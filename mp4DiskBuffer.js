@@ -179,7 +179,7 @@ function removeOldestFiles(outputFile, keepMaxFiles) {
 }
 function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
     return __awaiter(this, void 0, void 0, function () {
-        var curFile, writeStream, dataCounter;
+        var curFile, writeStream, dataCounter, totalDataLength, mp4AtomOffset, partialAtomBuffer;
         var _this = this;
         return __generator(this, function (_a) {
             switch (_a.label) {
@@ -195,47 +195,75 @@ function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
                     return [4 /*yield*/, fs.stat(curFile)];
                 case 3:
                     dataCounter = (_a.sent()).size;
-                    stream.on("data", function (chunk) { return __awaiter(_this, void 0, void 0, function () {
-                        var remainderSize, remainder, err_1, err;
+                    totalDataLength = 0;
+                    mp4AtomOffset = 0;
+                    partialAtomBuffer = null;
+                    stream.on("data", function (buffer) { return __awaiter(_this, void 0, void 0, function () {
+                        var relativeMP4AtomOffsetInBuffer, mp4AtomLength, atom, relativeOffset, remainderSize, remainder, err_1, err;
                         return __generator(this, function (_a) {
                             switch (_a.label) {
                                 case 0:
                                     stream.pause();
-                                    if (!(dataCounter + chunk.length > maxSizeBytes)) return [3 /*break*/, 6];
-                                    remainderSize = maxSizeBytes - dataCounter;
-                                    if (!(remainderSize > 0)) return [3 /*break*/, 2];
-                                    remainder = chunk.slice(0, remainderSize);
-                                    return [4 /*yield*/, writeToStream(writeStream, remainder)];
+                                    if (partialAtomBuffer != null) {
+                                        // there was a partial atom length+ atom offset
+                                        // prepend it to the buffer
+                                        buffer = Buffer.concat([partialAtomBuffer, buffer]);
+                                        partialAtomBuffer = null;
+                                    }
+                                    console.log("Data buffer received " + totalDataLength + " -> " + (totalDataLength + buffer.length));
+                                    relativeMP4AtomOffsetInBuffer = mp4AtomOffset - totalDataLength;
+                                    // make sure all atom length + atom is actually within the buffer (so do +8)
+                                    while (mp4AtomOffset + 8 < totalDataLength + buffer.length) {
+                                        relativeMP4AtomOffsetInBuffer = mp4AtomOffset - totalDataLength;
+                                        mp4AtomLength = buffer.readUIntBE(relativeMP4AtomOffsetInBuffer, 4);
+                                        atom = buffer.toString("utf8", relativeMP4AtomOffsetInBuffer + 4, relativeMP4AtomOffsetInBuffer + 4 + 4);
+                                        console.log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset + " -> " + (mp4AtomOffset + mp4AtomLength));
+                                        mp4AtomOffset += mp4AtomLength;
+                                    }
+                                    if (mp4AtomOffset < totalDataLength + buffer.length && mp4AtomOffset + 8 >= totalDataLength + buffer.length) {
+                                        relativeOffset = mp4AtomOffset - totalDataLength;
+                                        partialAtomBuffer = buffer.slice(relativeOffset);
+                                        buffer = buffer.slice(0, relativeOffset);
+                                    }
+                                    totalDataLength += buffer.length;
+                                    if (!(dataCounter + buffer.length > maxSizeBytes)) return [3 /*break*/, 7];
+                                    if (!(relativeMP4AtomOffsetInBuffer > buffer.length)) return [3 /*break*/, 1];
+                                    return [3 /*break*/, 7];
                                 case 1:
+                                    remainderSize = relativeMP4AtomOffsetInBuffer;
+                                    if (!(remainderSize > 0)) return [3 /*break*/, 3];
+                                    remainder = buffer.slice(0, remainderSize);
+                                    return [4 /*yield*/, writeToStream(writeStream, remainder)];
+                                case 2:
                                     err_1 = _a.sent();
                                     if (err_1)
                                         console.error("Error writing to file " + curFile + ": " + err_1);
-                                    chunk = chunk.slice(remainderSize);
-                                    _a.label = 2;
-                                case 2:
+                                    buffer = buffer.slice(remainderSize);
+                                    _a.label = 3;
+                                case 3:
                                     // close the current file and  create a new one
                                     writeStream.close();
                                     curFile = getNextFile(outputFile, curFile);
                                     writeStream = fs.createWriteStream(curFile);
                                     return [4 /*yield*/, openStream(writeStream)];
-                                case 3:
+                                case 4:
                                     _a.sent();
-                                    if (!keepMaxFiles) return [3 /*break*/, 5];
+                                    if (!keepMaxFiles) return [3 /*break*/, 6];
                                     // check if the nr of files in the folder doesn't exceed the max limit
                                     return [4 /*yield*/, removeOldestFiles(outputFile, keepMaxFiles)];
-                                case 4:
+                                case 5:
                                     // check if the nr of files in the folder doesn't exceed the max limit
                                     _a.sent();
-                                    _a.label = 5;
-                                case 5:
-                                    dataCounter = 0;
                                     _a.label = 6;
-                                case 6: return [4 /*yield*/, writeToStream(writeStream, chunk)];
-                                case 7:
+                                case 6:
+                                    dataCounter = 0;
+                                    _a.label = 7;
+                                case 7: return [4 /*yield*/, writeToStream(writeStream, buffer)];
+                                case 8:
                                     err = _a.sent();
                                     if (err)
                                         console.error("Error writing to file " + curFile + ": " + err);
-                                    dataCounter += chunk.length;
+                                    dataCounter += buffer.length;
                                     stream.resume();
                                     return [2 /*return*/];
                             }
@@ -258,7 +286,7 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset) {
         var _this = this;
         return __generator(this, function (_a) {
             return [2 /*return*/, new Promise(function (then, reject) { return __awaiter(_this, void 0, void 0, function () {
-                    var dataCounter_1, readStream_1, e_1;
+                    var dataCounter_1, readStream_1, mp4AtomOffset_1, isFinished_1, e_1;
                     var _this = this;
                     return __generator(this, function (_a) {
                         switch (_a.label) {
@@ -272,17 +300,39 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset) {
                                 return [4 /*yield*/, openStream(readStream_1)];
                             case 1:
                                 _a.sent();
-                                readStream_1.on("data", function (chunk) { return __awaiter(_this, void 0, void 0, function () {
+                                mp4AtomOffset_1 = 0;
+                                isFinished_1 = false;
+                                readStream_1.on("data", function (buffer) { return __awaiter(_this, void 0, void 0, function () {
+                                    var relativeMP4AtomOffsetInBuffer, mp4AtomLength, realExpectedChunkSize;
                                     return __generator(this, function (_a) {
                                         switch (_a.label) {
                                             case 0:
                                                 readStream_1.pause();
-                                                return [4 /*yield*/, writeToStream(outStream, chunk)];
+                                                // the disk buffer writer ensures that mp4 atoms are not fragmented over chunks
+                                                // and each chunk starts with an mp4 atom 
+                                                // this means that the filesize will vary anywhere between expectedChunkSize and expectedChunkSize + remainder of mp4 atom length
+                                                while (mp4AtomOffset_1 + 4 < dataCounter_1 + buffer.length) {
+                                                    relativeMP4AtomOffsetInBuffer = mp4AtomOffset_1 - dataCounter_1;
+                                                    mp4AtomLength = buffer.readUIntBE(relativeMP4AtomOffsetInBuffer, 4);
+                                                    mp4AtomOffset_1 += mp4AtomLength;
+                                                }
+                                                if (mp4AtomOffset_1 < dataCounter_1 + buffer.length && mp4AtomOffset_1 + 4 >= dataCounter_1 + buffer.length) {
+                                                    // again a partial scenario, there WILL be a next buffer containing the  remainder of the mp4 atom offset
+                                                    isFinished_1 = false;
+                                                }
+                                                else {
+                                                    if (dataCounter_1 >= expectedChunkSize) {
+                                                        realExpectedChunkSize = mp4AtomOffset_1;
+                                                        if (dataCounter_1 + buffer.length >= realExpectedChunkSize)
+                                                            isFinished_1 = true;
+                                                    }
+                                                }
+                                                return [4 /*yield*/, writeToStream(outStream, buffer)];
                                             case 1:
                                                 _a.sent();
                                                 readStream_1.resume();
-                                                dataCounter_1 += chunk.length;
-                                                if (dataCounter_1 >= expectedChunkSize) {
+                                                dataCounter_1 += buffer.length;
+                                                if (isFinished_1) {
                                                     // we're done reading
                                                     readStream_1.close();
                                                     then({
@@ -295,7 +345,7 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset) {
                                     });
                                 }); });
                                 readStream_1.on("end", function () {
-                                    if (dataCounter_1 >= expectedChunkSize) {
+                                    if (isFinished_1) {
                                         // we're done reading
                                         readStream_1.close();
                                         then({
@@ -479,4 +529,4 @@ var DiskBufferReader = /** @class */ (function () {
     return DiskBufferReader;
 }());
 exports.DiskBufferReader = DiskBufferReader;
-//# sourceMappingURL=diskBuffer.js.map
+//# sourceMappingURL=mp4DiskBuffer.js.map

@@ -18,8 +18,8 @@ var __importStar = (this && this.__importStar) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 var stream_1 = require("stream");
-var diskBuffer = __importStar(require("./diskBuffer"));
-//import * as fs from "fs"
+var mp4DiskBuffer = __importStar(require("./mp4DiskBuffer"));
+var fs = __importStar(require("fs"));
 var IncrementStream = /** @class */ (function (_super) {
     __extends(IncrementStream, _super);
     function IncrementStream() {
@@ -60,19 +60,20 @@ var PrintStream = /** @class */ (function (_super) {
     return PrintStream;
 }(stream_1.Stream.Writable));
 function main() {
-    var incStream = new IncrementStream();
-    var printStream = new PrintStream();
+    var incStream = fs.createReadStream("C:\\Custom\\testvod.mp4");
+    var printStream = fs.createWriteStream("C:\\Custom\\testvod-out.mp4", { flags: "w" });
     //    incStream.pipe(printStream);
     var chunkSize = 1024 * 1024;
     var testfile = "C:\\Custom\\tempstorage\\testfile.chk";
     var keepMaxFiles = 5;
-    var writer = new diskBuffer.DiskBufferWriter(testfile, chunkSize, keepMaxFiles);
-    writer.pipeToDisk(incStream)
-        .catch(function (err) {
-        console.log("Error writing to disk: " + err);
-        process.exit(1);
-    });
-    var reader = new diskBuffer.DiskBufferReader(testfile, chunkSize);
+    /*   let writer = new mp4DiskBuffer.DiskBufferWriter(testfile, chunkSize, keepMaxFiles);
+        writer.pipeToDisk(incStream)
+            .catch(err => {
+                console.log("Error writing to disk: " + err);
+                process.exit(1);
+            });
+    */
+    var reader = new mp4DiskBuffer.DiskBufferReader(testfile, chunkSize);
     reader.pipeFromDisk(printStream)
         .catch(function (err) {
         console.log("Error reading from disk: " + err);

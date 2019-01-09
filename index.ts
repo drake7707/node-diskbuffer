@@ -1,7 +1,8 @@
 import { Stream } from "stream";
 import * as diskBuffer from "./diskBuffer";
+import * as mp4DiskBuffer from "./mp4DiskBuffer";
 
-//import * as fs from "fs"
+import * as fs from "fs"
 
 
 
@@ -43,8 +44,8 @@ class PrintStream extends Stream.Writable {
 
 function main() {
 
-    let incStream = new IncrementStream();
-    let printStream = new PrintStream();
+    let incStream = fs.createReadStream("C:\\Custom\\testvod.mp4");
+    let printStream = fs.createWriteStream("C:\\Custom\\testvod-out.mp4", { flags: "w"});
 
     //    incStream.pipe(printStream);
 
@@ -52,19 +53,21 @@ function main() {
     let testfile = "C:\\Custom\\tempstorage\\testfile.chk";
     let keepMaxFiles = 5;
 
-    let writer = new diskBuffer.DiskBufferWriter(testfile, chunkSize, keepMaxFiles);
+/*   let writer = new mp4DiskBuffer.DiskBufferWriter(testfile, chunkSize, keepMaxFiles);
     writer.pipeToDisk(incStream)
         .catch(err => {
             console.log("Error writing to disk: " + err);
             process.exit(1);
         });
+*/
 
-    let reader = new diskBuffer.DiskBufferReader(testfile, chunkSize);
+    let reader = new mp4DiskBuffer.DiskBufferReader(testfile, chunkSize);
     reader.pipeFromDisk(printStream)
         .catch(err => {
             console.log("Error reading from disk: " + err);
             process.exit(2);
         });;
+     
 }
 
 main();
