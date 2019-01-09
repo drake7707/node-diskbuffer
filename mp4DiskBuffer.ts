@@ -236,9 +236,17 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
             let mp4AtomOffset = 0;
 
             let isFinished = false;
+            let partialAtomBuffer: Buffer | null = null;
 
             readStream.on("data", async buffer => {
                 readStream.pause();
+
+                if (partialAtomBuffer != null) {
+                    // there was a partial atom length+ atom offset
+                    // prepend it to the buffer
+                    buffer = Buffer.concat([partialAtomBuffer, buffer]);
+                    partialAtomBuffer = null;
+                }
 
                 // the disk buffer writer ensures that mp4 atoms are not fragmented over chunks
                 // and each chunk starts with an mp4 atom 
@@ -250,7 +258,11 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
                 }
 
                 if (mp4AtomOffset < dataCounter + buffer.length && mp4AtomOffset + 4 >= dataCounter + buffer.length) {
-                    // again a partial scenario, there WILL be a next buffer containing the  remainder of the mp4 atom offset
+                    // again a partial scenario, there WILL be a next buffer containing the remainder of the mp4 atom offset
+                    let relativeOffset = mp4AtomOffset - dataCounter;
+                    partialAtomBuffer = buffer.slice(relativeOffset);
+                    buffer = buffer.slice(0, relativeOffset);
+
                     isFinished = false;
                 }
                 else {
@@ -258,7 +270,7 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
                         // we've reached the expected chunk size, check if the latest mp4 atom is beyond this point
                         // the next mp4 atom is at mp4AtomOffset
                         let realExpectedChunkSize = mp4AtomOffset;
-                        if(dataCounter+buffer.length >= realExpectedChunkSize)
+                        if (dataCounter + buffer.length >= realExpectedChunkSize)
                             isFinished = true;
                     }
                 }

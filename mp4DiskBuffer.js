@@ -286,7 +286,7 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset) {
         var _this = this;
         return __generator(this, function (_a) {
             return [2 /*return*/, new Promise(function (then, reject) { return __awaiter(_this, void 0, void 0, function () {
-                    var dataCounter_1, readStream_1, mp4AtomOffset_1, isFinished_1, e_1;
+                    var dataCounter_1, readStream_1, mp4AtomOffset_1, isFinished_1, partialAtomBuffer_1, e_1;
                     var _this = this;
                     return __generator(this, function (_a) {
                         switch (_a.label) {
@@ -302,12 +302,19 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset) {
                                 _a.sent();
                                 mp4AtomOffset_1 = 0;
                                 isFinished_1 = false;
+                                partialAtomBuffer_1 = null;
                                 readStream_1.on("data", function (buffer) { return __awaiter(_this, void 0, void 0, function () {
-                                    var relativeMP4AtomOffsetInBuffer, mp4AtomLength, realExpectedChunkSize;
+                                    var relativeMP4AtomOffsetInBuffer, mp4AtomLength, relativeOffset, realExpectedChunkSize;
                                     return __generator(this, function (_a) {
                                         switch (_a.label) {
                                             case 0:
                                                 readStream_1.pause();
+                                                if (partialAtomBuffer_1 != null) {
+                                                    // there was a partial atom length+ atom offset
+                                                    // prepend it to the buffer
+                                                    buffer = Buffer.concat([partialAtomBuffer_1, buffer]);
+                                                    partialAtomBuffer_1 = null;
+                                                }
                                                 // the disk buffer writer ensures that mp4 atoms are not fragmented over chunks
                                                 // and each chunk starts with an mp4 atom 
                                                 // this means that the filesize will vary anywhere between expectedChunkSize and expectedChunkSize + remainder of mp4 atom length
@@ -317,7 +324,9 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset) {
                                                     mp4AtomOffset_1 += mp4AtomLength;
                                                 }
                                                 if (mp4AtomOffset_1 < dataCounter_1 + buffer.length && mp4AtomOffset_1 + 4 >= dataCounter_1 + buffer.length) {
-                                                    // again a partial scenario, there WILL be a next buffer containing the  remainder of the mp4 atom offset
+                                                    relativeOffset = mp4AtomOffset_1 - dataCounter_1;
+                                                    partialAtomBuffer_1 = buffer.slice(relativeOffset);
+                                                    buffer = buffer.slice(0, relativeOffset);
                                                     isFinished_1 = false;
                                                 }
                                                 else {
