@@ -77,7 +77,15 @@ function getNextFile(outputFile, oldFile) {
     nr++;
     return path.join(folder, baseFileWithoutExtension + "(" + nr + ")" + extension);
 }
-function getLatestFile(outputFile, maxSizeBytes) {
+function getInitFilePath(outputFile) {
+    var curFile;
+    var filename = path.basename(outputFile);
+    var folder = outputFile.substr(0, outputFile.length - filename.length);
+    var extension = path.extname(outputFile);
+    var fileWithoutExtension = filename.substr(0, filename.length - extension.length);
+    return path.join(folder, "init" + extension);
+}
+function getLatestFilePath(outputFile, maxSizeBytes) {
     return __awaiter(this, void 0, void 0, function () {
         var curFile, filename, folder, extension, fileWithoutExtension, currentFiles, matchingFiles, maxCounter, i, suffix, nr, counter;
         return __generator(this, function (_a) {
@@ -179,11 +187,11 @@ function removeOldestFiles(outputFile, keepMaxFiles) {
 }
 function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
     return __awaiter(this, void 0, void 0, function () {
-        var curFile, writeStream, dataCounter, totalDataLength, mp4AtomOffset, partialAtomBuffer;
+        var curFile, writeStream, currentChunkFileSize, totalDataLength, mp4AtomOffset, initBuffer, initBufferNeedsToBeAppendedUntilNextMP4Atom, initBufferProcessingAtom, partialAtomBuffer;
         var _this = this;
         return __generator(this, function (_a) {
             switch (_a.label) {
-                case 0: return [4 /*yield*/, getLatestFile(outputFile, maxSizeBytes)];
+                case 0: return [4 /*yield*/, getLatestFilePath(outputFile, maxSizeBytes)];
                 case 1:
                     curFile = _a.sent();
                     writeStream = fs.createWriteStream(curFile, {
@@ -194,76 +202,138 @@ function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
                     _a.sent();
                     return [4 /*yield*/, fs.stat(curFile)];
                 case 3:
-                    dataCounter = (_a.sent()).size;
+                    currentChunkFileSize = (_a.sent()).size;
                     totalDataLength = 0;
                     mp4AtomOffset = 0;
+                    initBuffer = Buffer.from([]);
+                    initBufferNeedsToBeAppendedUntilNextMP4Atom = false;
+                    initBufferProcessingAtom = "";
                     partialAtomBuffer = null;
                     stream.on("data", function (buffer) { return __awaiter(_this, void 0, void 0, function () {
-                        var relativeMP4AtomOffsetInBuffer, mp4AtomLength, atom, relativeOffset, remainderSize, remainder, err_1, err;
+                        var nextRelativeMP4AtomOffsetInBuffer, initPath, relativeMP4AtomOffsetInBuffer, mp4AtomLength, atom, initPath, relativeOffset, remainderSize, remainder, err_1, err;
                         return __generator(this, function (_a) {
                             switch (_a.label) {
                                 case 0:
                                     stream.pause();
+                                    console.log("Data buffer received " + totalDataLength + " -> " + (totalDataLength + buffer.length));
+                                    // ----- CHECK: Atom was fragmented over multiple data events?
                                     if (partialAtomBuffer != null) {
                                         // there was a partial atom length+ atom offset
                                         // prepend it to the buffer
                                         buffer = Buffer.concat([partialAtomBuffer, buffer]);
                                         partialAtomBuffer = null;
                                     }
-                                    console.log("Data buffer received " + totalDataLength + " -> " + (totalDataLength + buffer.length));
-                                    relativeMP4AtomOffsetInBuffer = mp4AtomOffset - totalDataLength;
-                                    // make sure all atom length + atom is actually within the buffer (so do +8)
-                                    while (mp4AtomOffset + 8 < totalDataLength + buffer.length) {
-                                        relativeMP4AtomOffsetInBuffer = mp4AtomOffset - totalDataLength;
-                                        mp4AtomLength = buffer.readUIntBE(relativeMP4AtomOffsetInBuffer, 4);
-                                        atom = buffer.toString("utf8", relativeMP4AtomOffsetInBuffer + 4, relativeMP4AtomOffsetInBuffer + 4 + 4);
-                                        console.log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset + " -> " + (mp4AtomOffset + mp4AtomLength));
-                                        mp4AtomOffset += mp4AtomLength;
+                                    if (!initBufferNeedsToBeAppendedUntilNextMP4Atom) return [3 /*break*/, 3];
+                                    nextRelativeMP4AtomOffsetInBuffer = mp4AtomOffset - totalDataLength;
+                                    if (nextRelativeMP4AtomOffsetInBuffer < buffer.length) {
+                                        initBuffer = Buffer.concat([initBuffer, buffer.slice(0, nextRelativeMP4AtomOffsetInBuffer)]);
+                                        initBufferNeedsToBeAppendedUntilNextMP4Atom = false;
                                     }
+                                    else {
+                                        // the part is not complete, need to continue reading on the next data event
+                                        initBuffer = Buffer.concat([initBuffer, buffer.slice(0, nextRelativeMP4AtomOffsetInBuffer)]);
+                                        initBufferNeedsToBeAppendedUntilNextMP4Atom = true;
+                                    }
+                                    if (!(!initBufferNeedsToBeAppendedUntilNextMP4Atom && initBufferProcessingAtom == "moov")) return [3 /*break*/, 2];
+                                    initPath = getInitFilePath(outputFile);
+                                    return [4 /*yield*/, fs.writeFile(initPath, initBuffer)];
+                                case 1:
+                                    _a.sent();
+                                    initBuffer = Buffer.from([]);
+                                    _a.label = 2;
+                                case 2:
+                                    // clear, the atom is complete
+                                    if (!initBufferNeedsToBeAppendedUntilNextMP4Atom)
+                                        initBufferProcessingAtom = "";
+                                    _a.label = 3;
+                                case 3:
+                                    relativeMP4AtomOffsetInBuffer = mp4AtomOffset - totalDataLength;
+                                    _a.label = 4;
+                                case 4:
+                                    if (!(mp4AtomOffset + 8 < totalDataLength + buffer.length)) return [3 /*break*/, 9];
+                                    relativeMP4AtomOffsetInBuffer = mp4AtomOffset - totalDataLength;
+                                    mp4AtomLength = buffer.readUIntBE(relativeMP4AtomOffsetInBuffer, 4);
+                                    atom = buffer.toString("utf8", relativeMP4AtomOffsetInBuffer + 4, relativeMP4AtomOffsetInBuffer + 4 + 4);
+                                    console.log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset + " -> " + (mp4AtomOffset + mp4AtomLength));
+                                    if (!(atom == "ftyp")) return [3 /*break*/, 5];
+                                    initBufferProcessingAtom = atom;
+                                    // mp4 file header, start of mp4 file
+                                    if (relativeMP4AtomOffsetInBuffer + mp4AtomLength < buffer.length) {
+                                        initBuffer = buffer.slice(relativeMP4AtomOffsetInBuffer, relativeMP4AtomOffsetInBuffer + mp4AtomLength);
+                                        initBufferNeedsToBeAppendedUntilNextMP4Atom = false;
+                                    }
+                                    else {
+                                        // the part is not complete, need to continue reading on the next data event
+                                        initBuffer = buffer.slice(relativeMP4AtomOffsetInBuffer);
+                                        initBufferNeedsToBeAppendedUntilNextMP4Atom = true;
+                                    }
+                                    return [3 /*break*/, 8];
+                                case 5:
+                                    if (!(atom == "moov")) return [3 /*break*/, 8];
+                                    initBufferProcessingAtom = atom;
+                                    if (!(relativeMP4AtomOffsetInBuffer + mp4AtomLength < buffer.length)) return [3 /*break*/, 7];
+                                    initBuffer = Buffer.concat([initBuffer, buffer.slice(relativeMP4AtomOffsetInBuffer, relativeMP4AtomOffsetInBuffer + mp4AtomLength)]);
+                                    initPath = getInitFilePath(outputFile);
+                                    return [4 /*yield*/, fs.writeFile(initPath, initBuffer)];
+                                case 6:
+                                    _a.sent();
+                                    initBuffer = Buffer.from([]);
+                                    initBufferNeedsToBeAppendedUntilNextMP4Atom = false;
+                                    return [3 /*break*/, 8];
+                                case 7:
+                                    // the part is not complete, need to continue reading on the next data event
+                                    initBuffer = Buffer.concat([initBuffer, buffer.slice(relativeMP4AtomOffsetInBuffer)]);
+                                    initBufferNeedsToBeAppendedUntilNextMP4Atom = true;
+                                    _a.label = 8;
+                                case 8:
+                                    mp4AtomOffset += mp4AtomLength;
+                                    return [3 /*break*/, 4];
+                                case 9:
                                     if (mp4AtomOffset < totalDataLength + buffer.length && mp4AtomOffset + 8 >= totalDataLength + buffer.length) {
                                         relativeOffset = mp4AtomOffset - totalDataLength;
                                         partialAtomBuffer = buffer.slice(relativeOffset);
                                         buffer = buffer.slice(0, relativeOffset);
                                     }
+                                    // keep track of the total data length in the entire stream
                                     totalDataLength += buffer.length;
-                                    if (!(dataCounter + buffer.length > maxSizeBytes)) return [3 /*break*/, 7];
-                                    if (!(relativeMP4AtomOffsetInBuffer > buffer.length)) return [3 /*break*/, 1];
-                                    return [3 /*break*/, 7];
-                                case 1:
+                                    if (!(currentChunkFileSize + buffer.length > maxSizeBytes)) return [3 /*break*/, 16];
+                                    if (!(relativeMP4AtomOffsetInBuffer > buffer.length)) return [3 /*break*/, 10];
+                                    return [3 /*break*/, 16];
+                                case 10:
                                     remainderSize = relativeMP4AtomOffsetInBuffer;
-                                    if (!(remainderSize > 0)) return [3 /*break*/, 3];
+                                    if (!(remainderSize > 0)) return [3 /*break*/, 12];
                                     remainder = buffer.slice(0, remainderSize);
                                     return [4 /*yield*/, writeToStream(writeStream, remainder)];
-                                case 2:
+                                case 11:
                                     err_1 = _a.sent();
                                     if (err_1)
                                         console.error("Error writing to file " + curFile + ": " + err_1);
                                     buffer = buffer.slice(remainderSize);
-                                    _a.label = 3;
-                                case 3:
+                                    _a.label = 12;
+                                case 12:
                                     // close the current file and  create a new one
                                     writeStream.close();
                                     curFile = getNextFile(outputFile, curFile);
                                     writeStream = fs.createWriteStream(curFile);
                                     return [4 /*yield*/, openStream(writeStream)];
-                                case 4:
+                                case 13:
                                     _a.sent();
-                                    if (!keepMaxFiles) return [3 /*break*/, 6];
+                                    if (!keepMaxFiles) return [3 /*break*/, 15];
                                     // check if the nr of files in the folder doesn't exceed the max limit
                                     return [4 /*yield*/, removeOldestFiles(outputFile, keepMaxFiles)];
-                                case 5:
+                                case 14:
                                     // check if the nr of files in the folder doesn't exceed the max limit
                                     _a.sent();
-                                    _a.label = 6;
-                                case 6:
-                                    dataCounter = 0;
-                                    _a.label = 7;
-                                case 7: return [4 /*yield*/, writeToStream(writeStream, buffer)];
-                                case 8:
+                                    _a.label = 15;
+                                case 15:
+                                    currentChunkFileSize = 0;
+                                    _a.label = 16;
+                                case 16: return [4 /*yield*/, writeToStream(writeStream, buffer)];
+                                case 17:
                                     err = _a.sent();
                                     if (err)
                                         console.error("Error writing to file " + curFile + ": " + err);
-                                    dataCounter += buffer.length;
+                                    currentChunkFileSize += buffer.length;
                                     stream.resume();
                                     return [2 /*return*/];
                             }
