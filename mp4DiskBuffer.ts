@@ -396,7 +396,7 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
             });
             await openStream(readStream);
 
-            let mp4AtomOffset = 0;
+            let mp4AtomOffset = offset;
 
             let isFinished = false;
             let partialAtomBuffer: Buffer | null = null;

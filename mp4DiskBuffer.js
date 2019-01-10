@@ -463,7 +463,7 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset) {
                                 return [4 /*yield*/, openStream(readStream_1)];
                             case 1:
                                 _a.sent();
-                                mp4AtomOffset_1 = 0;
+                                mp4AtomOffset_1 = offset;
                                 isFinished_1 = false;
                                 partialAtomBuffer_1 = null;
                                 readStream_1.on("data", function (buffer) { return __awaiter(_this, void 0, void 0, function () {
