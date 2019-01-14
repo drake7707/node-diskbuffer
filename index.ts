@@ -53,21 +53,22 @@ function main() {
     let testfile = "C:\\Custom\\tempstorage\\testfile.chk";
     let keepMaxFiles = 5;
 
-  /* let writer = new mp4DiskBuffer.DiskBufferWriter(testfile, chunkSize, keepMaxFiles);
+   let writer = new mp4DiskBuffer.DiskBufferWriter(testfile, chunkSize, keepMaxFiles);
     writer.pipeToDisk(incStream)
         .catch(err => {
             console.log("Error writing to disk: " + err);
             process.exit(1);
         });
-*/
 
+
+        /*
     let reader = new mp4DiskBuffer.DiskBufferReader(testfile, chunkSize, true);
     reader.pipeFromDisk(printStream)
         .catch(err => {
             console.log("Error reading from disk: " + err);
             process.exit(2);
         });
-     
+     */
 }
 
 main();
