@@ -41,9 +41,19 @@ var __importStar = (this && this.__importStar) || function (mod) {
     result["default"] = mod;
     return result;
 };
+var _this = this;
 Object.defineProperty(exports, "__esModule", { value: true });
 var fs = __importStar(require("async-file"));
 var path = __importStar(require("path"));
+exports.DEBUG = false;
+function log(msg) {
+    if (exports.DEBUG)
+        console.log(msg);
+}
+function error(msg) {
+    if (exports.DEBUG)
+        console.error(msg);
+}
 function canWriteToFile(outputFile, maxSizeBytes) {
     return __awaiter(this, void 0, void 0, function () {
         var exists, fileSize, remainingSize, expectedFileLength;
@@ -251,7 +261,7 @@ function getExpectedFileLengthForCorrectMP4AtomAlignment(filepath) {
 }
 function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
     return __awaiter(this, void 0, void 0, function () {
-        var curFile, currentChunkFileSize, _a, chunkFileShouldBeOfLength, padding, writeStream, totalDataLength, mp4AtomOffset, initBuffer, initBufferNeedsToBeAppendedUntilNextMP4Atom, initBufferProcessingAtom, partialAtomBuffer;
+        var curFile, currentChunkFileSize, _a, chunkFileShouldBeOfLength, padding, writeStream, totalDataLength, mp4AtomOffset, moofMP4AtomOffset, initBuffer, initBufferNeedsToBeAppendedUntilNextMP4Atom, initBufferProcessingAtom, partialAtomBuffer;
         var _this = this;
         return __generator(this, function (_b) {
             switch (_b.label) {
@@ -275,7 +285,7 @@ function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
                     chunkFileShouldBeOfLength = _b.sent();
                     if (!(currentChunkFileSize < chunkFileShouldBeOfLength)) return [3 /*break*/, 8];
                     // pad with zeroes
-                    console.log("Continuing existing chunk " + curFile + " but file is not properly aligned to mp4 atoms, padding with zeroes");
+                    log("Continuing existing chunk " + curFile + " but file is not properly aligned to mp4 atoms, padding with zeroes");
                     padding = new Array(chunkFileShouldBeOfLength - currentChunkFileSize).fill(0);
                     return [4 /*yield*/, fs.appendFile(curFile, Buffer.from(padding))];
                 case 7:
@@ -284,14 +294,14 @@ function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
                 case 8:
                     if (!(currentChunkFileSize > chunkFileShouldBeOfLength)) return [3 /*break*/, 10];
                     // file needs to be truncated to align the proper mp4 atom
-                    console.log("Continuing existing chunk " + curFile + " but file is not properly aligned to mp4 atoms, truncating to last expected mp4 atom position");
+                    log("Continuing existing chunk " + curFile + " but file is not properly aligned to mp4 atoms, truncating to last expected mp4 atom position");
                     return [4 /*yield*/, fs.truncate(curFile, chunkFileShouldBeOfLength)];
                 case 9:
                     _b.sent();
                     return [3 /*break*/, 11];
                 case 10:
                     // hey it perfectly aligns, nothing needs to be done
-                    console.log("Continuing existing chunk " + curFile);
+                    log("Continuing existing chunk " + curFile);
                     _b.label = 11;
                 case 11:
                     writeStream = fs.createWriteStream(curFile, {
@@ -302,17 +312,18 @@ function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
                     _b.sent();
                     totalDataLength = 0;
                     mp4AtomOffset = 0;
+                    moofMP4AtomOffset = -1;
                     initBuffer = Buffer.from([]);
                     initBufferNeedsToBeAppendedUntilNextMP4Atom = false;
                     initBufferProcessingAtom = "";
                     partialAtomBuffer = null;
                     stream.on("data", function (buffer) { return __awaiter(_this, void 0, void 0, function () {
-                        var nextRelativeMP4AtomOffsetInBuffer, initPath, relativeMP4AtomOffsetInBuffer, mp4AtomLength, atom, initPath, relativeOffset, remainderSize, remainder, err_1, err;
+                        var nextRelativeMP4AtomOffsetInBuffer, initPath, relativeMP4AtomOffsetInBuffer, mp4AtomLength, atom, initPath, relativeOffset, relativeMOOFMP4AtomOffsetInBuffer, remainderSize, remainder, err_1, err;
                         return __generator(this, function (_a) {
                             switch (_a.label) {
                                 case 0:
                                     stream.pause();
-                                    //console.log("Data buffer received " + totalDataLength + " -> " + (totalDataLength + buffer.length));
+                                    //log("Data buffer received " + totalDataLength + " -> " + (totalDataLength + buffer.length));
                                     // ----- CHECK: Atom was fragmented over multiple data events?
                                     if (partialAtomBuffer != null) {
                                         // there was a partial atom length+ atom offset
@@ -351,7 +362,7 @@ function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
                                     relativeMP4AtomOffsetInBuffer = mp4AtomOffset - totalDataLength;
                                     mp4AtomLength = buffer.readUIntBE(relativeMP4AtomOffsetInBuffer, 4);
                                     atom = buffer.toString("utf8", relativeMP4AtomOffsetInBuffer + 4, relativeMP4AtomOffsetInBuffer + 4 + 4);
-                                    console.log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset + " -> " + (mp4AtomOffset + mp4AtomLength));
+                                    log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset + " -> " + (mp4AtomOffset + mp4AtomLength));
                                     if (!(atom == "ftyp")) return [3 /*break*/, 5];
                                     initBufferProcessingAtom = atom;
                                     // mp4 file header, start of mp4 file
@@ -383,6 +394,9 @@ function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
                                     initBufferNeedsToBeAppendedUntilNextMP4Atom = true;
                                     _a.label = 8;
                                 case 8:
+                                    if (atom == "moof") {
+                                        moofMP4AtomOffset = mp4AtomOffset;
+                                    }
                                     mp4AtomOffset += mp4AtomLength;
                                     return [3 /*break*/, 4];
                                 case 9:
@@ -390,46 +404,52 @@ function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
                                         relativeOffset = mp4AtomOffset - totalDataLength;
                                         partialAtomBuffer = buffer.slice(relativeOffset);
                                         buffer = buffer.slice(0, relativeOffset);
+                                        // TODO wait a minute, if we're changing the buffer, what impact does this have 
+                                        // on all the offsets we're using here????
                                     }
+                                    relativeMOOFMP4AtomOffsetInBuffer = moofMP4AtomOffset - totalDataLength;
                                     // keep track of the total data length in the entire stream
                                     totalDataLength += buffer.length;
-                                    if (!(currentChunkFileSize + buffer.length > maxSizeBytes)) return [3 /*break*/, 16];
-                                    if (!(relativeMP4AtomOffsetInBuffer > buffer.length)) return [3 /*break*/, 10];
-                                    return [3 /*break*/, 16];
+                                    if (!(currentChunkFileSize + buffer.length >= maxSizeBytes)) return [3 /*break*/, 17];
+                                    if (!(relativeMOOFMP4AtomOffsetInBuffer < 0)) return [3 /*break*/, 10];
+                                    return [3 /*break*/, 17];
                                 case 10:
-                                    remainderSize = relativeMP4AtomOffsetInBuffer;
-                                    if (!(remainderSize > 0)) return [3 /*break*/, 12];
+                                    if (!(relativeMOOFMP4AtomOffsetInBuffer >= buffer.length)) return [3 /*break*/, 11];
+                                    return [3 /*break*/, 17];
+                                case 11:
+                                    remainderSize = relativeMOOFMP4AtomOffsetInBuffer;
+                                    if (!(remainderSize > 0)) return [3 /*break*/, 13];
                                     remainder = buffer.slice(0, remainderSize);
                                     return [4 /*yield*/, writeToStream(writeStream, remainder)];
-                                case 11:
+                                case 12:
                                     err_1 = _a.sent();
                                     if (err_1)
-                                        console.error("Error writing to file " + curFile + ": " + err_1);
+                                        error("Error writing to file " + curFile + ": " + err_1);
                                     buffer = buffer.slice(remainderSize);
-                                    _a.label = 12;
-                                case 12:
+                                    _a.label = 13;
+                                case 13:
                                     // close the current file and  create a new one
                                     writeStream.close();
                                     curFile = getNextFile(outputFile, curFile);
                                     writeStream = fs.createWriteStream(curFile);
                                     return [4 /*yield*/, openStream(writeStream)];
-                                case 13:
+                                case 14:
                                     _a.sent();
-                                    if (!keepMaxFiles) return [3 /*break*/, 15];
+                                    if (!keepMaxFiles) return [3 /*break*/, 16];
                                     // check if the nr of files in the folder doesn't exceed the max limit
                                     return [4 /*yield*/, removeOldestFiles(outputFile, keepMaxFiles)];
-                                case 14:
+                                case 15:
                                     // check if the nr of files in the folder doesn't exceed the max limit
                                     _a.sent();
-                                    _a.label = 15;
-                                case 15:
-                                    currentChunkFileSize = 0;
                                     _a.label = 16;
-                                case 16: return [4 /*yield*/, writeToStream(writeStream, buffer)];
-                                case 17:
+                                case 16:
+                                    currentChunkFileSize = 0;
+                                    _a.label = 17;
+                                case 17: return [4 /*yield*/, writeToStream(writeStream, buffer)];
+                                case 18:
                                     err = _a.sent();
                                     if (err)
-                                        console.error("Error writing to file " + curFile + ": " + err);
+                                        error("Error writing to file " + curFile + ": " + err);
                                     currentChunkFileSize += buffer.length;
                                     stream.resume();
                                     return [2 /*return*/];
@@ -476,7 +496,7 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset, startMP4At
                                     return __generator(this, function (_a) {
                                         switch (_a.label) {
                                             case 0:
-                                                console.log("Buffer read, length " + buffer.length + ", file chunk " + curPositionInFile_1 + " -> " + (curPositionInFile_1 + buffer.length));
+                                                log("Buffer read, length " + buffer.length + ", file chunk " + curPositionInFile_1 + " -> " + (curPositionInFile_1 + buffer.length));
                                                 if (isFinished_1) // don't do anything anymore, is finished
                                                     return [2 /*return*/];
                                                 readStream_1.pause();
@@ -484,7 +504,7 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset, startMP4At
                                                 if (partialAtomBuffer_1 != null) {
                                                     // there was a partial atom length+ atom offset
                                                     // prepend it to the buffer
-                                                    console.log("There was a partial atom buffer (length: " + partialAtomBuffer_1.length + ") from the previous data event, prepending it to the buffer");
+                                                    log("There was a partial atom buffer (length: " + partialAtomBuffer_1.length + ") from the previous data event, prepending it to the buffer");
                                                     buffer = Buffer.concat([partialAtomBuffer_1, buffer]);
                                                     partialAtomBuffer_1 = null;
                                                 }
@@ -495,12 +515,12 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset, startMP4At
                                                     relativeMP4AtomOffsetInBuffer = mp4AtomOffset_1 - curPositionInFile_1;
                                                     mp4AtomLength = buffer.readUIntBE(relativeMP4AtomOffsetInBuffer, 4);
                                                     atom = buffer.toString("utf8", relativeMP4AtomOffsetInBuffer + 4, relativeMP4AtomOffsetInBuffer + 4 + 4);
-                                                    console.log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset_1 + " -> " + (mp4AtomOffset_1 + mp4AtomLength));
+                                                    log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset_1 + " -> " + (mp4AtomOffset_1 + mp4AtomLength));
                                                     mp4AtomOffset_1 += mp4AtomLength;
                                                 }
                                                 if (mp4AtomOffset_1 < curPositionInFile_1 + buffer.length && mp4AtomOffset_1 + 8 >= curPositionInFile_1 + buffer.length) {
                                                     relativeOffset = mp4AtomOffset_1 - curPositionInFile_1;
-                                                    console.log("MP4 Atom is fragmented,  keeping the partial buffer seperate to append later, buffer length is " + buffer.length + ", cur position in file is " + curPositionInFile_1 + ", mp4 atom offset is " + mp4AtomOffset_1 + ", relative offset in buffer is " + relativeOffset);
+                                                    log("MP4 Atom is fragmented,  keeping the partial buffer seperate to append later, buffer length is " + buffer.length + ", cur position in file is " + curPositionInFile_1 + ", mp4 atom offset is " + mp4AtomOffset_1 + ", relative offset in buffer is " + relativeOffset);
                                                     partialAtomBuffer_1 = buffer.slice(relativeOffset);
                                                     buffer = buffer.slice(0, relativeOffset);
                                                     isFinished_1 = false;
@@ -509,17 +529,17 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset, startMP4At
                                                     if (curPositionInFile_1 >= expectedChunkSize) {
                                                         // we've reached the expected chunk size, check if the latest mp4 atom is beyond this point
                                                         // the next mp4 atom is at mp4AtomOffset
-                                                        console.log("Reached expected chunk size (" + curPositionInFile_1 + " > " + expectedChunkSize + ")");
+                                                        log("Reached expected chunk size (" + curPositionInFile_1 + " > " + expectedChunkSize + ")");
                                                         realExpectedChunkSize = mp4AtomOffset_1;
                                                         if (curPositionInFile_1 + buffer.length >= realExpectedChunkSize) {
-                                                            console.log("The current position + buffer length is longer or equal " + curPositionInFile_1 + " + " + buffer.length + " >= " + realExpectedChunkSize + " than the mp4 atom offset so the file is finished");
+                                                            log("The current position + buffer length is longer or equal " + curPositionInFile_1 + " + " + buffer.length + " >= " + realExpectedChunkSize + " than the mp4 atom offset so the file is finished");
                                                             isFinished_1 = true;
                                                         }
                                                     }
                                                 }
                                                 // DO NOT WRITE ANYTHING AFTER THIS AWAIT THAT IS CHANGING  THINGS THAT IS REFERRED TO IN THE END EVENT!
                                                 // NODEJS IS UNDETERMINISTIC, SOMETIMES END IS CALLED BEFORE CONTINUING THE AWAIT (FOR SMALL BUFFERS)
-                                                console.log("Buffer written to output stream, advancing pointer");
+                                                log("Buffer written to output stream, advancing pointer");
                                                 // advance position _before_ the piping to the stream !, otherwise end event might get the wrong offset
                                                 curPositionInFile_1 += buffer.length;
                                                 return [4 /*yield*/, writeToStream(outStream, buffer)];
@@ -655,24 +675,27 @@ var CancelToken = /** @class */ (function () {
 }());
 function pipeFilesToStream(inputFile, outStream, expectedChunkSize, writeInitChunkIfAvailable, cancelToken) {
     return __awaiter(this, void 0, void 0, function () {
-        var initFile_1, stop, _loop_1;
+        var initFile_1, outputStreamClosed, _loop_1;
         return __generator(this, function (_a) {
             switch (_a.label) {
                 case 0:
-                    if (!writeInitChunkIfAvailable) return [3 /*break*/, 6];
+                    if (!writeInitChunkIfAvailable) return [3 /*break*/, 7];
                     initFile_1 = getInitFilePath(inputFile);
-                    console.log("Waiting for init file " + initFile_1 + " to become available ");
+                    log("Waiting for init file " + initFile_1 + " to become available ");
                     _a.label = 1;
                 case 1: return [4 /*yield*/, fs.exists(initFile_1)];
                 case 2:
-                    if (!!(_a.sent())) return [3 /*break*/, 3];
+                    if (!(!(_a.sent()) && !cancelToken.isCancelled())) return [3 /*break*/, 4];
+                    return [4 /*yield*/, delay(100)];
+                case 3:
+                    _a.sent();
+                    return [3 /*break*/, 1];
+                case 4:
                     if (cancelToken.isCancelled())
                         return [2 /*return*/];
-                    delay(100);
-                    return [3 /*break*/, 1];
-                case 3: return [4 /*yield*/, fs.exists(initFile_1)];
-                case 4:
-                    if (!_a.sent()) return [3 /*break*/, 6];
+                    return [4 /*yield*/, fs.exists(initFile_1)];
+                case 5:
+                    if (!_a.sent()) return [3 /*break*/, 7];
                     return [4 /*yield*/, new Promise(function (then, reject) {
                             var initStream = fs.createReadStream(initFile_1);
                             initStream.on("data", function (buffer) {
@@ -683,18 +706,18 @@ function pipeFilesToStream(inputFile, outStream, expectedChunkSize, writeInitChu
                                 then();
                             });
                         })];
-                case 5:
-                    _a.sent();
-                    _a.label = 6;
                 case 6:
-                    stop = false;
+                    _a.sent();
+                    _a.label = 7;
+                case 7:
+                    outputStreamClosed = false;
                     outStream.on("close", function () {
-                        console.log("Output stream was closed");
-                        stop = true;
+                        log("Output stream was closed");
+                        outputStreamClosed = true;
                     });
-                    console.log("Starting to read buffer files");
+                    log("Starting to read buffer files");
                     _loop_1 = function () {
-                        var files, filename, folder, extension, fileWithoutExtension, currentFiles, matchingFilesNrs, sortedNrs, i, filepath, file, isFinished, dataOffset, nextMP4AtomOffset, result, hasEnoughData, fileSize, result, result;
+                        var files, filename, folder, extension, fileWithoutExtension, currentFiles, matchingFilesNrs, sortedNrs, i, filepath, file;
                         return __generator(this, function (_a) {
                             switch (_a.label) {
                                 case 0:
@@ -718,110 +741,128 @@ function pipeFilesToStream(inputFile, outStream, expectedChunkSize, writeInitChu
                                         files.push(filepath);
                                     }
                                     if (files.length > 0) {
-                                        console.log("There are " + files.length + " to process");
+                                        log("There are " + files.length + " to process");
                                     }
                                     _a.label = 2;
                                 case 2:
-                                    if (!(files.length > 0)) return [3 /*break*/, 18];
+                                    if (!(files.length > 0)) return [3 /*break*/, 4];
                                     file = files.shift();
-                                    console.log("Processing file " + file);
-                                    isFinished = false;
-                                    dataOffset = 0;
-                                    nextMP4AtomOffset = 0;
-                                    if (!(dataOffset == 0 && writeInitChunkIfAvailable)) return [3 /*break*/, 8];
-                                    result = void 0;
-                                    hasEnoughData = false;
-                                    _a.label = 3;
+                                    log("Processing file " + file);
+                                    return [4 /*yield*/, processFileToPipeToStream(file, writeInitChunkIfAvailable, cancelToken, outStream, expectedChunkSize)];
                                 case 3:
-                                    if (!!hasEnoughData) return [3 /*break*/, 7];
-                                    return [4 /*yield*/, fileStartsWithFtypAndMoov(file)];
-                                case 4:
-                                    result = _a.sent();
-                                    hasEnoughData = !result.notEnoughData;
-                                    if (!!hasEnoughData) return [3 /*break*/, 6];
-                                    return [4 /*yield*/, delay(100)];
-                                case 5:
-                                    _a.sent();
-                                    _a.label = 6;
-                                case 6: return [3 /*break*/, 3];
-                                case 7:
-                                    if (result.hasInit) {
-                                        console.log("File " + file + " has init segment, the init chunk was already injected in the stream so skipping until after the init part to offset " + result.offsetAfterInit);
-                                        dataOffset = result.offsetAfterInit;
-                                        nextMP4AtomOffset = result.offsetAfterInit;
-                                    }
-                                    else {
-                                        console.log("File does not have an init segment, can just read from the beginning of the file");
-                                    }
-                                    _a.label = 8;
-                                case 8:
-                                    if (!(!isFinished && !stop)) return [3 /*break*/, 16];
-                                    return [4 /*yield*/, fs.stat(file)];
-                                case 9:
-                                    fileSize = (_a.sent()).size;
-                                    if (!(files.length > 1)) return [3 /*break*/, 11];
-                                    // it's easy if it's not the last file, just pipe the whole file to the output
-                                    if (fileSize < expectedChunkSize) {
-                                        // this file is not the latest one but it's not the expected chunk size, corruption will occur
-                                        console.warn("Filesize of chunk " + file + " is unexpectedly less (" + fileSize + ") than the expected chunk size (" + expectedChunkSize + "). Corruption is highly probable");
-                                    }
-                                    console.log("Piping " + file + " with offset " + dataOffset + " to the stream");
-                                    return [4 /*yield*/, pipeFileToStream(file, outStream, expectedChunkSize, dataOffset, nextMP4AtomOffset)];
-                                case 10:
-                                    result = _a.sent();
-                                    console.log("Data of " + file + " was piped to the stream until offset " + result.readUntilOffset + ", isFinished=" + result.isFinished + ", next mp4 offset is at " + result.nextMP4AtomOffset);
-                                    isFinished = result.isFinished;
-                                    dataOffset = result.readUntilOffset;
-                                    nextMP4AtomOffset = result.nextMP4AtomOffset;
-                                    _a.label = 11;
-                                case 11:
-                                    if (!(dataOffset < fileSize)) return [3 /*break*/, 13];
-                                    console.log("Piping " + file + " with offset " + dataOffset + " to the stream");
-                                    return [4 /*yield*/, pipeFileToStream(file, outStream, expectedChunkSize, dataOffset, nextMP4AtomOffset)];
-                                case 12:
-                                    result = _a.sent();
-                                    console.log("Data of " + file + " was piped to the stream until offset " + result.readUntilOffset + ", isFinished=" + result.isFinished + ", next mp4 offset is at " + result.nextMP4AtomOffset);
-                                    isFinished = result.isFinished;
-                                    dataOffset = result.readUntilOffset;
-                                    nextMP4AtomOffset = result.nextMP4AtomOffset;
-                                    _a.label = 13;
-                                case 13:
-                                    if (!!isFinished) return [3 /*break*/, 15];
-                                    //console.warn("Buffer underrun, waiting for data to become available");
-                                    if (cancelToken.isCancelled()) {
-                                        console.log("Reader was cancelled");
-                                        stop = true;
-                                    }
-                                    return [4 /*yield*/, delay(100)];
-                                case 14:
-                                    _a.sent(); //  wait a bit for data to become available
-                                    _a.label = 15;
-                                case 15: return [3 /*break*/, 8];
-                                case 16:
-                                    // now clean it up
-                                    console.log("Cleaning up file " + file);
-                                    return [4 /*yield*/, fs.delete(file)];
-                                case 17:
                                     _a.sent();
                                     return [3 /*break*/, 2];
-                                case 18: 
+                                case 4: 
                                 // prevent hammering with tight loop
                                 return [4 /*yield*/, delay(100)];
-                                case 19:
+                                case 5:
                                     // prevent hammering with tight loop
                                     _a.sent();
                                     return [2 /*return*/];
                             }
                         });
                     };
-                    _a.label = 7;
-                case 7:
-                    if (!!stop) return [3 /*break*/, 9];
-                    return [5 /*yield**/, _loop_1()];
+                    _a.label = 8;
                 case 8:
+                    if (!(!outputStreamClosed && !cancelToken.isCancelled())) return [3 /*break*/, 10];
+                    return [5 /*yield**/, _loop_1()];
+                case 9:
                     _a.sent();
-                    return [3 /*break*/, 7];
-                case 9: return [2 /*return*/];
+                    return [3 /*break*/, 8];
+                case 10: return [2 /*return*/];
+            }
+        });
+    });
+}
+function processFileToPipeToStream(file, writeInitChunkIfAvailable, cancelToken, outStream, expectedChunkSize) {
+    return __awaiter(this, void 0, void 0, function () {
+        var fileStillExists, isFinished, dataOffset, nextMP4AtomOffset, result, hasEnoughData, fileSize, result;
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0: return [4 /*yield*/, fs.exists(file)];
+                case 1:
+                    fileStillExists = _a.sent();
+                    if (!fileStillExists) {
+                        log("File " + file + " doesn't exist anymore, skipping file");
+                        return [2 /*return*/];
+                    }
+                    isFinished = false;
+                    dataOffset = 0;
+                    nextMP4AtomOffset = 0;
+                    if (!(dataOffset == 0 && writeInitChunkIfAvailable)) return [3 /*break*/, 8];
+                    result = null;
+                    hasEnoughData = false;
+                    _a.label = 2;
+                case 2:
+                    if (!(!hasEnoughData && !cancelToken.isCancelled())) return [3 /*break*/, 7];
+                    return [4 /*yield*/, fs.exists(file)];
+                case 3:
+                    fileStillExists = _a.sent();
+                    if (!fileStillExists) {
+                        log("File " + file + " doesn't exist anymore, aborting check to see if the file starts with init atoms");
+                        return [2 /*return*/];
+                    }
+                    return [4 /*yield*/, fileStartsWithFtypAndMoov(file)];
+                case 4:
+                    result = _a.sent();
+                    hasEnoughData = !result.notEnoughData;
+                    if (!!hasEnoughData) return [3 /*break*/, 6];
+                    return [4 /*yield*/, delay(100)];
+                case 5:
+                    _a.sent();
+                    _a.label = 6;
+                case 6: return [3 /*break*/, 2];
+                case 7:
+                    if (cancelToken.isCancelled()) {
+                        log("Reader was cancelled while waiting for init chunk to become available");
+                    }
+                    if (result != null && result.hasInit) {
+                        log("File " + file + " has init segment, the init chunk was already injected in the stream so skipping until after the init part to offset " + result.offsetAfterInit);
+                        dataOffset = result.offsetAfterInit;
+                        nextMP4AtomOffset = result.offsetAfterInit;
+                    }
+                    else {
+                        log("File does not have an init segment, can just read from the beginning of the file");
+                    }
+                    _a.label = 8;
+                case 8:
+                    if (!(!isFinished && !cancelToken.isCancelled())) return [3 /*break*/, 15];
+                    return [4 /*yield*/, fs.stat(file)];
+                case 9:
+                    fileSize = (_a.sent()).size;
+                    return [4 /*yield*/, fs.exists(file)];
+                case 10:
+                    fileStillExists = _a.sent();
+                    if (!fileStillExists) {
+                        log("File " + file + " doesn't exist anymore, aborting pipe");
+                        return [2 /*return*/];
+                    }
+                    if (!(dataOffset < fileSize)) return [3 /*break*/, 12];
+                    log("Piping " + file + " with offset " + dataOffset + " to the stream");
+                    return [4 /*yield*/, pipeFileToStream(file, outStream, expectedChunkSize, dataOffset, nextMP4AtomOffset)];
+                case 11:
+                    result = _a.sent();
+                    log("Data of " + file + " was piped to the stream until offset " + result.readUntilOffset + ", isFinished=" + result.isFinished + ", next mp4 offset is at " + result.nextMP4AtomOffset);
+                    isFinished = result.isFinished;
+                    dataOffset = result.readUntilOffset;
+                    nextMP4AtomOffset = result.nextMP4AtomOffset;
+                    _a.label = 12;
+                case 12:
+                    if (!!isFinished) return [3 /*break*/, 14];
+                    //console.warn("Buffer underrun, waiting for data to become available");
+                    return [4 /*yield*/, delay(100)];
+                case 13:
+                    //console.warn("Buffer underrun, waiting for data to become available");
+                    _a.sent(); //  wait a bit for data to become available
+                    _a.label = 14;
+                case 14: return [3 /*break*/, 8];
+                case 15:
+                    // now clean it up
+                    log("Cleaning up file " + file);
+                    return [4 /*yield*/, fs.delete(file)];
+                case 16:
+                    _a.sent();
+                    return [2 /*return*/];
             }
         });
     });
@@ -847,6 +888,44 @@ var DiskBufferWriter = /** @class */ (function () {
     return DiskBufferWriter;
 }());
 exports.DiskBufferWriter = DiskBufferWriter;
+var deleteFolderRecursive = function (p) { return __awaiter(_this, void 0, void 0, function () {
+    var _i, _a, entry, curPath;
+    return __generator(this, function (_b) {
+        switch (_b.label) {
+            case 0: return [4 /*yield*/, fs.exists(p)];
+            case 1:
+                if (!_b.sent()) return [3 /*break*/, 11];
+                _i = 0;
+                return [4 /*yield*/, fs.readdir(p)];
+            case 2:
+                _a = _b.sent();
+                _b.label = 3;
+            case 3:
+                if (!(_i < _a.length)) return [3 /*break*/, 9];
+                entry = _a[_i];
+                curPath = path + "/" + entry;
+                return [4 /*yield*/, fs.lstat(curPath)];
+            case 4:
+                if (!(_b.sent()).isDirectory()) return [3 /*break*/, 6];
+                return [4 /*yield*/, deleteFolderRecursive(curPath)];
+            case 5:
+                _b.sent();
+                return [3 /*break*/, 8];
+            case 6: return [4 /*yield*/, fs.unlink(curPath)];
+            case 7:
+                _b.sent();
+                _b.label = 8;
+            case 8:
+                _i++;
+                return [3 /*break*/, 3];
+            case 9: return [4 /*yield*/, fs.rmdir(p)];
+            case 10:
+                _b.sent();
+                _b.label = 11;
+            case 11: return [2 /*return*/];
+        }
+    });
+}); };
 var DiskBufferReader = /** @class */ (function () {
     function DiskBufferReader(pathAndFileFormat, expectedChunkSize, writeInitChunkIfAvailable) {
         this.pathAndFileFormat = pathAndFileFormat;
@@ -859,6 +938,23 @@ var DiskBufferReader = /** @class */ (function () {
             return __generator(this, function (_a) {
                 switch (_a.label) {
                     case 0: return [4 /*yield*/, pipeFilesToStream(this.pathAndFileFormat, writeableStream, this.expectedChunkSize, this.writeInitChunkIfAvailable, this.cancelToken)];
+                    case 1:
+                        _a.sent();
+                        return [2 /*return*/];
+                }
+            });
+        });
+    };
+    DiskBufferReader.prototype.cleanUp = function () {
+        return __awaiter(this, void 0, void 0, function () {
+            var filename, folder;
+            return __generator(this, function (_a) {
+                switch (_a.label) {
+                    case 0:
+                        filename = path.basename(this.pathAndFileFormat);
+                        folder = this.pathAndFileFormat.substr(0, this.pathAndFileFormat.length - filename.length);
+                        console.log("Cleaning up disk buffer, deleting folder " + folder);
+                        return [4 /*yield*/, deleteFolderRecursive(folder)];
                     case 1:
                         _a.sent();
                         return [2 /*return*/];

@@ -61,14 +61,14 @@ function main() {
         });
 
 
-        /*
-    let reader = new mp4DiskBuffer.DiskBufferReader(testfile, chunkSize, true);
+        
+  /*  let reader = new mp4DiskBuffer.DiskBufferReader(testfile, chunkSize, true);
     reader.pipeFromDisk(printStream)
         .catch(err => {
             console.log("Error reading from disk: " + err);
             process.exit(2);
-        });
-     */
+        });*/
+     
 }
 
 main();

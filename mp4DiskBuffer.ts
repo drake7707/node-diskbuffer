@@ -2,6 +2,17 @@ import * as fs from 'async-file';
 
 import * as path from "path";
 
+export var DEBUG: boolean = false;
+
+function log(msg: string) {
+    if (DEBUG)
+        console.log(msg);
+}
+function error(msg: string) {
+    if (DEBUG)
+        console.error(msg);
+}
+
 async function canWriteToFile(outputFile: string, maxSizeBytes: number) {
     let exists = await fs.exists(outputFile);
     if (!exists)
@@ -197,18 +208,18 @@ async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: stri
 
         if (currentChunkFileSize < chunkFileShouldBeOfLength) {
             // pad with zeroes
-            console.log("Continuing existing chunk " + curFile + " but file is not properly aligned to mp4 atoms, padding with zeroes");
+            log("Continuing existing chunk " + curFile + " but file is not properly aligned to mp4 atoms, padding with zeroes");
             let padding = new Array(chunkFileShouldBeOfLength - currentChunkFileSize).fill(0);
             await fs.appendFile(curFile, Buffer.from(padding));
         }
         else if (currentChunkFileSize > chunkFileShouldBeOfLength) {
             // file needs to be truncated to align the proper mp4 atom
-            console.log("Continuing existing chunk " + curFile + " but file is not properly aligned to mp4 atoms, truncating to last expected mp4 atom position");
+            log("Continuing existing chunk " + curFile + " but file is not properly aligned to mp4 atoms, truncating to last expected mp4 atom position");
             await fs.truncate(curFile, chunkFileShouldBeOfLength);
         }
         else {
             // hey it perfectly aligns, nothing needs to be done
-            console.log("Continuing existing chunk " + curFile);
+            log("Continuing existing chunk " + curFile);
         }
     }
 
@@ -224,6 +235,10 @@ async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: stri
     let totalDataLength = 0;
     let mp4AtomOffset = 0;
 
+    // track the offset of the last moof. Chunks should not only be mp4 atom aligned, they should only split on moof
+    // because [ftyp+moov]+mdat is invalid
+    let moofMP4AtomOffset = -1;
+
 
     let initBuffer: Buffer = Buffer.from([]);
     let initBufferNeedsToBeAppendedUntilNextMP4Atom: boolean = false;
@@ -235,7 +250,7 @@ async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: stri
         stream.pause();
 
 
-        //console.log("Data buffer received " + totalDataLength + " -> " + (totalDataLength + buffer.length));
+        //log("Data buffer received " + totalDataLength + " -> " + (totalDataLength + buffer.length));
 
 
         // ----- CHECK: Atom was fragmented over multiple data events?
@@ -280,6 +295,7 @@ async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: stri
         // --- ADVANCE mp4 atom and extract ftyp and moov atoms to push to the init buffer
         let relativeMP4AtomOffsetInBuffer = mp4AtomOffset - totalDataLength;
 
+
         // ---- READ MP4 Atoms to track mp4AtomOffset and extract the ftyp+moov for init 
         // make sure all atom length + atom is actually within the buffer (so do +8)
         while (mp4AtomOffset + 8 < totalDataLength + buffer.length) {
@@ -287,7 +303,7 @@ async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: stri
             let mp4AtomLength = buffer.readUIntBE(relativeMP4AtomOffsetInBuffer, 4);
 
             let atom = buffer.toString("utf8", relativeMP4AtomOffsetInBuffer + 4, relativeMP4AtomOffsetInBuffer + 4 + 4);
-            console.log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset + " -> " + (mp4AtomOffset + mp4AtomLength));
+            log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset + " -> " + (mp4AtomOffset + mp4AtomLength));
 
 
             // --- extract ftyp+moov to the init buffer and write init chunk if complete
@@ -322,6 +338,10 @@ async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: stri
                 }
             }
 
+            if (atom == "moof") {
+                moofMP4AtomOffset = mp4AtomOffset;
+            }
+
             mp4AtomOffset += mp4AtomLength;
         }
 
@@ -331,28 +351,34 @@ async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: stri
             // first, so it can be prepended for the next buffer
             let relativeOffset = mp4AtomOffset - totalDataLength;
             partialAtomBuffer = buffer.slice(relativeOffset);
-            buffer = buffer.slice(0, relativeOffset);
+            buffer = buffer.slice(0, relativeOffset); 
+
+            // TODO wait a minute, if we're changing the buffer, what impact does this have 
+            // on all the offsets we're using here????
         }
+
+        let relativeMOOFMP4AtomOffsetInBuffer = moofMP4AtomOffset - totalDataLength;
 
         // keep track of the total data length in the entire stream
         totalDataLength += buffer.length;
 
+        if (currentChunkFileSize + buffer.length >= maxSizeBytes) {
 
-        if (currentChunkFileSize + buffer.length > maxSizeBytes) {
-
-            // relativeMP4AtomOffsetInBuffer is now the last mp4 offset in the buffer
-            if (relativeMP4AtomOffsetInBuffer > buffer.length) {
-                // it's beyond the buffer length, wait for the next data buffer before splitting
+            if(relativeMOOFMP4AtomOffsetInBuffer < 0) {
+                // wait until we have a moof atom in the buffer before splitting
+            } else if(relativeMOOFMP4AtomOffsetInBuffer >= buffer.length) {
+                // this can't happen because the MOOF should be encountered in the buffer
             }
             else {
-                // rather than take the remainder size on max size bytes, take the remainder on the last mp4 atom offset
-                //let remainderSize = maxSizeBytes - dataCounter;
-                let remainderSize = relativeMP4AtomOffsetInBuffer;
+                // split on MOOF atom. This ensures that a chunk will always be
+                // ftyp+moov+moof+mdat, which is required for ffmpeg.
+
+                let remainderSize = relativeMOOFMP4AtomOffsetInBuffer;
                 if (remainderSize > 0) {
                     let remainder = buffer.slice(0, remainderSize);
                     let err = await writeToStream(writeStream, remainder);
                     if (err)
-                        console.error("Error writing to file " + curFile + ": " + err);
+                        error("Error writing to file " + curFile + ": " + err);
                     buffer = buffer.slice(remainderSize);
                 }
 
@@ -369,11 +395,52 @@ async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: stri
                 }
                 currentChunkFileSize = 0;
             }
+         
+         /*  OLD CODE THAT SPLIT ON MP4 ATOM ALIGNED CHUNKS, NOT ON MOOF
+         
+            // relativeMP4AtomOffsetInBuffer is now the last mp4 offset in the buffer
+            if (relativeMP4AtomOffsetInBuffer > buffer.length) {
+                // it's beyond the buffer length, wait for the next data buffer before splitting
+            }
+            else if (currentChunkFileSize + relativeMP4AtomOffsetInBuffer < maxSizeBytes) {
+                // the mp4 atom is in a position in the buffer where if it were to be cut until that poin
+                // the total file size of the chunk would be below the expected file size. This may not happen
+                // or the reader will stall expecting the rest
+                // wait until the next data buffer before splitting
+            }
+            else {
+                // rather than take the remainder size on max size bytes, take the remainder on the last mp4 atom offset
+                //let remainderSize = maxSizeBytes - dataCounter;
+                let remainderSize = relativeMP4AtomOffsetInBuffer;
+                if (remainderSize > 0) {
+                    let remainder = buffer.slice(0, remainderSize);
+                    let err = await writeToStream(writeStream, remainder);
+                    if (err)
+                        error("Error writing to file " + curFile + ": " + err);
+                    buffer = buffer.slice(remainderSize);
+                }
+
+                // close the current file and  create a new one
+                writeStream.close();
+
+                curFile = getNextFile(outputFile, curFile);
+                writeStream = fs.createWriteStream(curFile);
+                await openStream(writeStream);
+
+                if (keepMaxFiles) {
+                    // check if the nr of files in the folder doesn't exceed the max limit
+                    await removeOldestFiles(outputFile, keepMaxFiles);
+                }
+                currentChunkFileSize = 0;
+            }*/
         }
+
+
+
 
         let err = await writeToStream(writeStream, buffer);
         if (err)
-            console.error("Error writing to file " + curFile + ": " + err);
+            error("Error writing to file " + curFile + ": " + err);
         currentChunkFileSize += buffer.length;
 
         stream.resume();
@@ -410,7 +477,7 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
             let partialAtomBuffer: Buffer | null = null;
 
             readStream.on("data", async buffer => {
-                console.log(`Buffer read, length ${buffer.length}, file chunk ${curPositionInFile} -> ${curPositionInFile + buffer.length}`);
+                log(`Buffer read, length ${buffer.length}, file chunk ${curPositionInFile} -> ${curPositionInFile + buffer.length}`);
 
                 if (isFinished) // don't do anything anymore, is finished
                     return;
@@ -423,7 +490,7 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
                 if (partialAtomBuffer != null) {
                     // there was a partial atom length+ atom offset
                     // prepend it to the buffer
-                    console.log(`There was a partial atom buffer (length: ${partialAtomBuffer.length}) from the previous data event, prepending it to the buffer`);
+                    log(`There was a partial atom buffer (length: ${partialAtomBuffer.length}) from the previous data event, prepending it to the buffer`);
                     buffer = Buffer.concat([partialAtomBuffer, buffer]);
                     partialAtomBuffer = null;
                 }
@@ -436,7 +503,7 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
                     let mp4AtomLength = buffer.readUIntBE(relativeMP4AtomOffsetInBuffer, 4);
 
                     let atom = buffer.toString("utf8", relativeMP4AtomOffsetInBuffer + 4, relativeMP4AtomOffsetInBuffer + 4 + 4);
-                    console.log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset + " -> " + (mp4AtomOffset + mp4AtomLength));
+                    log("mp4 atom '" + atom + "' offset: " + mp4AtomOffset + " -> " + (mp4AtomOffset + mp4AtomLength));
 
                     mp4AtomOffset += mp4AtomLength;
                 }
@@ -444,7 +511,7 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
                 if (mp4AtomOffset < curPositionInFile + buffer.length && mp4AtomOffset + 8 >= curPositionInFile + buffer.length) {
                     // again a partial scenario, there WILL be a next buffer containing the remainder of the mp4 atom offset
                     let relativeOffset = mp4AtomOffset - curPositionInFile;
-                    console.log(`MP4 Atom is fragmented,  keeping the partial buffer seperate to append later, buffer length is ${buffer.length}, cur position in file is ${curPositionInFile}, mp4 atom offset is ${mp4AtomOffset}, relative offset in buffer is ${relativeOffset}`);
+                    log(`MP4 Atom is fragmented,  keeping the partial buffer seperate to append later, buffer length is ${buffer.length}, cur position in file is ${curPositionInFile}, mp4 atom offset is ${mp4AtomOffset}, relative offset in buffer is ${relativeOffset}`);
                     partialAtomBuffer = buffer.slice(relativeOffset);
                     buffer = buffer.slice(0, relativeOffset);
 
@@ -454,10 +521,10 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
                     if (curPositionInFile >= expectedChunkSize) {
                         // we've reached the expected chunk size, check if the latest mp4 atom is beyond this point
                         // the next mp4 atom is at mp4AtomOffset
-                        console.log(`Reached expected chunk size (${curPositionInFile} > ${expectedChunkSize})`);
+                        log(`Reached expected chunk size (${curPositionInFile} > ${expectedChunkSize})`);
                         let realExpectedChunkSize = mp4AtomOffset;
                         if (curPositionInFile + buffer.length >= realExpectedChunkSize) {
-                            console.log(`The current position + buffer length is longer or equal ${curPositionInFile} + ${buffer.length} >= ${realExpectedChunkSize} than the mp4 atom offset so the file is finished`);
+                            log(`The current position + buffer length is longer or equal ${curPositionInFile} + ${buffer.length} >= ${realExpectedChunkSize} than the mp4 atom offset so the file is finished`);
                             isFinished = true;
                         }
                     }
@@ -466,7 +533,7 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
 
                 // DO NOT WRITE ANYTHING AFTER THIS AWAIT THAT IS CHANGING  THINGS THAT IS REFERRED TO IN THE END EVENT!
                 // NODEJS IS UNDETERMINISTIC, SOMETIMES END IS CALLED BEFORE CONTINUING THE AWAIT (FOR SMALL BUFFERS)
-                console.log("Buffer written to output stream, advancing pointer");
+                log("Buffer written to output stream, advancing pointer");
 
                 // advance position _before_ the piping to the stream !, otherwise end event might get the wrong offset
                 curPositionInFile += buffer.length;
@@ -518,6 +585,8 @@ interface CheckFileForInitResult {
 }
 
 async function fileStartsWithFtypAndMoov(inputFile: string): Promise<CheckFileForInitResult> {
+
+
     let stream = fs.createReadStream(inputFile);
     await openStream(stream);
 
@@ -605,14 +674,13 @@ async function pipeFilesToStream(inputFile: string, outStream: NodeJS.WritableSt
     if (writeInitChunkIfAvailable) {
         let initFile = getInitFilePath(inputFile);
 
-        console.log("Waiting for init file " + initFile + " to become available ");
-        while (!await fs.exists(initFile)) {
-
-            if (cancelToken.isCancelled())
-                return;
-
-            delay(100);
+        log("Waiting for init file " + initFile + " to become available ");
+        while (!await fs.exists(initFile) && !cancelToken.isCancelled()) {
+            await delay(100);
         }
+
+        if (cancelToken.isCancelled())
+            return;
 
         if (await fs.exists(initFile)) {
             await new Promise<void>((then, reject) => {
@@ -628,15 +696,15 @@ async function pipeFilesToStream(inputFile: string, outStream: NodeJS.WritableSt
         }
     }
 
-    let stop = false;
+    let outputStreamClosed = false;
     outStream.on("close", () => {
-        console.log("Output stream was closed");
-        stop = true;
+        log("Output stream was closed");
+        outputStreamClosed = true;
     });
 
-    console.log("Starting to read buffer files");
+    log("Starting to read buffer files");
 
-    while (!stop) {
+    while (!outputStreamClosed && !cancelToken.isCancelled()) {
         let files: string[] = [];
         let filename = path.basename(inputFile);
         let folder = inputFile.substr(0, inputFile.length - filename.length);
@@ -657,91 +725,92 @@ async function pipeFilesToStream(inputFile: string, outStream: NodeJS.WritableSt
         }
 
         if (files.length > 0) {
-            console.log(`There are ${files.length} to process`);
+            log(`There are ${files.length} to process`);
         }
 
         while (files.length > 0) {
             let file = files.shift()!;
-            console.log(`Processing file ${file}`);
+            log(`Processing file ${file}`);
+            await processFileToPipeToStream(file, writeInitChunkIfAvailable, cancelToken, outStream, expectedChunkSize);
 
-            let isFinished = false;
-            let dataOffset = 0;
-            let nextMP4AtomOffset = 0;
-
-            if (dataOffset == 0 && writeInitChunkIfAvailable) {
-                // must check if the file doesn't start with an init chunk
-
-                let result: CheckFileForInitResult;
-                let hasEnoughData = false;
-                while (!hasEnoughData) {
-                    result = await fileStartsWithFtypAndMoov(file);
-                    hasEnoughData = !result.notEnoughData;
-                    if (!hasEnoughData)
-                        await delay(100);
-                }
-
-                if (result!.hasInit) {
-                    console.log(`File ${file} has init segment, the init chunk was already injected in the stream so skipping until after the init part to offset ${result!.offsetAfterInit}`)
-                    dataOffset = result!.offsetAfterInit;
-                    nextMP4AtomOffset = result!.offsetAfterInit;
-                } else {
-                    console.log(`File does not have an init segment, can just read from the beginning of the file`);
-                }
-            }
-
-            while (!isFinished && !stop) {
-                let fileSize = (await fs.stat(file)).size;
-
-
-                if (files.length > 1) {
-                    // it's easy if it's not the last file, just pipe the whole file to the output
-
-                    if (fileSize < expectedChunkSize) {
-                        // this file is not the latest one but it's not the expected chunk size, corruption will occur
-                        console.warn("Filesize of chunk " + file + " is unexpectedly less (" + fileSize + ") than the expected chunk size (" + expectedChunkSize + "). Corruption is highly probable");
-                    }
-
-                    console.log("Piping " + file + " with offset " + dataOffset + " to the stream");
-                    let result = await pipeFileToStream(file, outStream, expectedChunkSize, dataOffset, nextMP4AtomOffset);
-
-                    console.log(`Data of ${file} was piped to the stream until offset ${result.readUntilOffset}, isFinished=${result.isFinished}, next mp4 offset is at ${result.nextMP4AtomOffset}`);
-                    isFinished = result.isFinished;
-                    dataOffset = result.readUntilOffset;
-
-                    nextMP4AtomOffset = result.nextMP4AtomOffset;
-
-                }
-
-                if (dataOffset < fileSize) {
-
-                    console.log("Piping " + file + " with offset " + dataOffset + " to the stream");
-                    let result = await pipeFileToStream(file, outStream, expectedChunkSize, dataOffset, nextMP4AtomOffset);
-                    console.log(`Data of ${file} was piped to the stream until offset ${result.readUntilOffset}, isFinished=${result.isFinished}, next mp4 offset is at ${result.nextMP4AtomOffset}`);
-                    isFinished = result.isFinished;
-                    dataOffset = result.readUntilOffset;
-                    nextMP4AtomOffset = result.nextMP4AtomOffset;
-                }
-                if (!isFinished) {
-                    //console.warn("Buffer underrun, waiting for data to become available");
-
-                    if (cancelToken.isCancelled()) {
-                        console.log("Reader was cancelled")
-                        stop = true;
-                    }
-
-                    await delay(100); //  wait a bit for data to become available
-                }
-            }
-
-            // now clean it up
-            console.log(`Cleaning up file ${file}`);
-            await fs.delete(file);
         }
 
         // prevent hammering with tight loop
         await delay(100);
     }
+}
 
+async function processFileToPipeToStream(file: string, writeInitChunkIfAvailable: boolean, cancelToken: CancelToken, outStream: NodeJS.WritableStream, expectedChunkSize: number) {
+    let fileStillExists = await fs.exists(file);
+    if (!fileStillExists) {
+        log(`File ${file} doesn't exist anymore, skipping file`)
+        return;
+    }
+
+    let isFinished = false;
+    let dataOffset = 0;
+    let nextMP4AtomOffset = 0;
+
+    if (dataOffset == 0 && writeInitChunkIfAvailable) {
+        // must check if the file doesn't start with an init chunk
+
+        let result: CheckFileForInitResult | null = null;
+        let hasEnoughData = false;
+        while (!hasEnoughData && !cancelToken.isCancelled()) {
+
+            fileStillExists = await fs.exists(file);
+            if (!fileStillExists) {
+                log(`File ${file} doesn't exist anymore, aborting check to see if the file starts with init atoms`)
+                return;
+            }
+
+            result = await fileStartsWithFtypAndMoov(file);
+            hasEnoughData = !result.notEnoughData;
+            if (!hasEnoughData)
+                await delay(100);
+        }
+
+        if (cancelToken.isCancelled()) {
+            log("Reader was cancelled while waiting for init chunk to become available")
+        }
+
+        if (result != null && result.hasInit) {
+            log(`File ${file} has init segment, the init chunk was already injected in the stream so skipping until after the init part to offset ${result.offsetAfterInit}`)
+            dataOffset = result.offsetAfterInit;
+            nextMP4AtomOffset = result.offsetAfterInit;
+        } else {
+            log(`File does not have an init segment, can just read from the beginning of the file`);
+        }
+    }
+
+
+    while (!isFinished && !cancelToken.isCancelled()) {
+        let fileSize = (await fs.stat(file)).size;
+
+        fileStillExists = await fs.exists(file);
+        if (!fileStillExists) {
+            log(`File ${file} doesn't exist anymore, aborting pipe`)
+            return;
+        }
+
+        if (dataOffset < fileSize) {
+            log("Piping " + file + " with offset " + dataOffset + " to the stream");
+            let result = await pipeFileToStream(file, outStream, expectedChunkSize, dataOffset, nextMP4AtomOffset);
+            log(`Data of ${file} was piped to the stream until offset ${result.readUntilOffset}, isFinished=${result.isFinished}, next mp4 offset is at ${result.nextMP4AtomOffset}`);
+            isFinished = result.isFinished;
+            dataOffset = result.readUntilOffset;
+            nextMP4AtomOffset = result.nextMP4AtomOffset;
+        }
+
+        if (!isFinished) {
+            //console.warn("Buffer underrun, waiting for data to become available");
+            await delay(100); //  wait a bit for data to become available
+        }
+    }
+
+    // now clean it up
+    log(`Cleaning up file ${file}`);
+    await fs.delete(file);
 }
 
 
@@ -759,6 +828,19 @@ export class DiskBufferWriter {
     }
 }
 
+
+const deleteFolderRecursive = async (p:string) =>  {
+    if (await fs.exists(p)) {
+        for (let entry of await fs.readdir(p)) {
+            const curPath = path + "/" + entry;
+            if ((await fs.lstat(curPath)).isDirectory())
+                await deleteFolderRecursive(curPath);
+            else await fs.unlink(curPath);
+        }
+        await fs.rmdir(p);
+    }
+};
+
 export class DiskBufferReader {
 
     private cancelToken: CancelToken;
@@ -773,6 +855,16 @@ export class DiskBufferReader {
         await pipeFilesToStream(this.pathAndFileFormat, writeableStream, this.expectedChunkSize, this.writeInitChunkIfAvailable, this.cancelToken);
     }
 
+
+    
+    async cleanUp() {
+        let filename = path.basename(this.pathAndFileFormat);
+        let folder = this.pathAndFileFormat.substr(0, this.pathAndFileFormat.length - filename.length);
+    
+        console.log("Cleaning up disk buffer, deleting folder " + folder);
+        await deleteFolderRecursive(folder);
+    }
+    
     async closeWhenBufferIsDone() {
         this.cancelToken.cancel();
     }
