@@ -369,6 +369,12 @@ async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: stri
             } else if(relativeMOOFMP4AtomOffsetInBuffer >= buffer.length) {
                 // this can't happen because the MOOF should be encountered in the buffer
             }
+            else if (currentChunkFileSize + relativeMOOFMP4AtomOffsetInBuffer < maxSizeBytes) {
+                // the mp4 atom is in a position in the buffer where if it were to be cut until that point
+                // the total file size of the chunk would be below the expected file size. This may not happen
+                // or the reader will stall expecting the rest
+                // wait until the next data buffer before splitting
+            }
             else {
                 // split on MOOF atom. This ensures that a chunk will always be
                 // ftyp+moov+moof+mdat, which is required for ffmpeg.
@@ -467,7 +473,8 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
 
             let readStream = fs.createReadStream(file, {
                 flags: "r",
-                start: curPositionInFile
+                start: curPositionInFile,
+              //  highWaterMark: 1024 // only read tiny amount to see how partial atoms work fine -> they do!!!
             });
             await openStream(readStream);
 

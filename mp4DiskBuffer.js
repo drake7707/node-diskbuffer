@@ -410,43 +410,46 @@ function pipeStreamToFiles(stream, outputFile, maxSizeBytes, keepMaxFiles) {
                                     relativeMOOFMP4AtomOffsetInBuffer = moofMP4AtomOffset - totalDataLength;
                                     // keep track of the total data length in the entire stream
                                     totalDataLength += buffer.length;
-                                    if (!(currentChunkFileSize + buffer.length >= maxSizeBytes)) return [3 /*break*/, 17];
+                                    if (!(currentChunkFileSize + buffer.length >= maxSizeBytes)) return [3 /*break*/, 18];
                                     if (!(relativeMOOFMP4AtomOffsetInBuffer < 0)) return [3 /*break*/, 10];
-                                    return [3 /*break*/, 17];
+                                    return [3 /*break*/, 18];
                                 case 10:
                                     if (!(relativeMOOFMP4AtomOffsetInBuffer >= buffer.length)) return [3 /*break*/, 11];
-                                    return [3 /*break*/, 17];
+                                    return [3 /*break*/, 18];
                                 case 11:
+                                    if (!(currentChunkFileSize + relativeMOOFMP4AtomOffsetInBuffer < maxSizeBytes)) return [3 /*break*/, 12];
+                                    return [3 /*break*/, 18];
+                                case 12:
                                     remainderSize = relativeMOOFMP4AtomOffsetInBuffer;
-                                    if (!(remainderSize > 0)) return [3 /*break*/, 13];
+                                    if (!(remainderSize > 0)) return [3 /*break*/, 14];
                                     remainder = buffer.slice(0, remainderSize);
                                     return [4 /*yield*/, writeToStream(writeStream, remainder)];
-                                case 12:
+                                case 13:
                                     err_1 = _a.sent();
                                     if (err_1)
                                         error("Error writing to file " + curFile + ": " + err_1);
                                     buffer = buffer.slice(remainderSize);
-                                    _a.label = 13;
-                                case 13:
+                                    _a.label = 14;
+                                case 14:
                                     // close the current file and  create a new one
                                     writeStream.close();
                                     curFile = getNextFile(outputFile, curFile);
                                     writeStream = fs.createWriteStream(curFile);
                                     return [4 /*yield*/, openStream(writeStream)];
-                                case 14:
+                                case 15:
                                     _a.sent();
-                                    if (!keepMaxFiles) return [3 /*break*/, 16];
+                                    if (!keepMaxFiles) return [3 /*break*/, 17];
                                     // check if the nr of files in the folder doesn't exceed the max limit
                                     return [4 /*yield*/, removeOldestFiles(outputFile, keepMaxFiles)];
-                                case 15:
+                                case 16:
                                     // check if the nr of files in the folder doesn't exceed the max limit
                                     _a.sent();
-                                    _a.label = 16;
-                                case 16:
-                                    currentChunkFileSize = 0;
                                     _a.label = 17;
-                                case 17: return [4 /*yield*/, writeToStream(writeStream, buffer)];
-                                case 18:
+                                case 17:
+                                    currentChunkFileSize = 0;
+                                    _a.label = 18;
+                                case 18: return [4 /*yield*/, writeToStream(writeStream, buffer)];
+                                case 19:
                                     err = _a.sent();
                                     if (err)
                                         error("Error writing to file " + curFile + ": " + err);
@@ -483,7 +486,7 @@ function pipeFileToStream(file, outStream, expectedChunkSize, offset, startMP4At
                                 curPositionInFile_1 = offset;
                                 readStream_1 = fs.createReadStream(file, {
                                     flags: "r",
-                                    start: curPositionInFile_1
+                                    start: curPositionInFile_1,
                                 });
                                 return [4 /*yield*/, openStream(readStream_1)];
                             case 1:

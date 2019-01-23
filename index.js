@@ -63,24 +63,26 @@ var PrintStream = /** @class */ (function (_super) {
     return PrintStream;
 }(stream_1.Stream.Writable));
 function main() {
-    var incStream = fs.createReadStream("C:\\Custom\\testvod.mp4");
+    var incStream = fs.createReadStream("C:\\Custom\\postedvideo-1.mp4");
     var printStream = fs.createWriteStream("C:\\Custom\\testvod-out.mp4", { flags: "w" });
     //    incStream.pipe(printStream);
-    var chunkSize = 1024 * 1024;
+    var chunkSize = 4 * 1024 * 1024;
     var testfile = "C:\\Custom\\tempstorage\\testfile.chk";
-    var keepMaxFiles = 5;
+    var keepMaxFiles = 500;
     var writer = new mp4DiskBuffer.DiskBufferWriter(testfile, chunkSize, keepMaxFiles);
-    writer.pipeToDisk(incStream)
+    /*writer.pipeToDisk(incStream)
+        .catch(err => {
+            console.log("Error writing to disk: " + err);
+            process.exit(1);
+        });
+
+*/
+    var reader = new mp4DiskBuffer.DiskBufferReader(testfile, chunkSize, true);
+    reader.pipeFromDisk(printStream)
         .catch(function (err) {
-        console.log("Error writing to disk: " + err);
-        process.exit(1);
+        console.log("Error reading from disk: " + err);
+        process.exit(2);
     });
-    /*  let reader = new mp4DiskBuffer.DiskBufferReader(testfile, chunkSize, true);
-      reader.pipeFromDisk(printStream)
-          .catch(err => {
-              console.log("Error reading from disk: " + err);
-              process.exit(2);
-          });*/
 }
 main();
 //# sourceMappingURL=index.js.map
