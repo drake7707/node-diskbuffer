@@ -42,37 +42,45 @@ class PrintStream extends Stream.Writable {
 }
 
 
-function main() {
+async function main() {
 
-    let incStream = fs.createReadStream("C:\\Custom\\postedvideo-1.mp4");
-    let printStream = fs.createWriteStream("C:\\Custom\\testvod-out.mp4", { flags: "w"});
+    let incStream = fs.createReadStream("C:\\Custom\\postedvideo-1.mp4", { highWaterMark: 500 });
+    let printStream = fs.createWriteStream("C:\\Custom\\testvod-out.mp4", { flags: "w" });
 
     //    incStream.pipe(printStream);
 
-    let chunkSize = 4 * 1024 * 1024;
+    let chunkSize = 20 * 1024 * 1024;
     let testfile = "C:\\Custom\\tempstorage\\testfile.chk";
     let keepMaxFiles = 500;
 
-   let writer = new mp4DiskBuffer.DiskBufferWriter(testfile, chunkSize, keepMaxFiles);
-   
-    /*writer.pipeToDisk(incStream)
+    let writer = new diskBuffer.DiskBufferWriter(testfile, chunkSize, keepMaxFiles);
+
+    writer.pipeToDisk(incStream)
         .catch(err => {
             console.log("Error writing to disk: " + err);
             process.exit(1);
         });
 
-*/
-        
-   let reader = new mp4DiskBuffer.DiskBufferReader(testfile, chunkSize, true);
-    reader.pipeFromDisk(printStream)
-        .catch(err => {
-            console.log("Error reading from disk: " + err);
-            process.exit(2);
-        });
-       
-     
+
+    
+let reader = new diskBuffer.DiskBufferReader(testfile, chunkSize);
+reader.pipeFromDisk(printStream)
+    .catch(err => {
+        console.log("Error reading from disk: " + err);
+        process.exit(2);
+    });
+
+
+   /* setTimeout(() => {
+        reader.closeWhenBufferIsDone();
+    }, 1000);*/
 }
 
-main();
+
+main().then(() => {
+
+}).catch((err) => {
+    console.error(err);
+})
 
 

@@ -3,6 +3,7 @@ import * as fs from 'async-file';
 import * as path from "path";
 import { Stream, prototype } from 'stream';
 import { read } from 'fs';
+import { CancelToken } from './cancelToken';
 
 
 
@@ -115,106 +116,148 @@ async function removeOldestFiles(outputFile: string, keepMaxFiles: number) {
     }
 }
 
-async function pipeStreamToFiles(stream: any, outputFile: string, maxSizeBytes: number, keepMaxFiles?: number) {
+async function isBufferOverflow(outputFile: string, keepMaxFiles: number): Promise<boolean> {
+    let filename = path.basename(outputFile);
+    let folder = outputFile.substr(0, outputFile.length - filename.length);
+    let extension = path.extname(outputFile);
+    let fileWithoutExtension = filename.substr(0, filename.length - extension.length);
+    let currentFiles = await fs.readdir(folder);
+    let matchingFilesNrs = currentFiles.filter(file => file.startsWith(fileWithoutExtension))
+        .map(file => {
+            let suffix = file.substr(fileWithoutExtension.length + 1);
+            let nr = suffix.substr(0, suffix.length - extension.length - 1);
+            return parseInt(nr);
+        });
+    if (matchingFilesNrs.length > keepMaxFiles) {
+        return true;
+    }
 
-    let curFile = await getLatestFile(outputFile, maxSizeBytes);
-    let writeStream = fs.createWriteStream(curFile, {
-        flags: "a"
-    });
-    await openStream(writeStream);
+    return false;
+}
 
-    let dataCounter = (await fs.stat(curFile)).size;
+async function pipeStreamToFiles(stream: NodeJS.ReadableStream, outputFile: string, maxSizeBytes: number, cancelToken: CancelToken, keepMaxFiles?: number, throwErrorOnBufferOverflow: boolean = true) {
 
-    stream.on("data", async (chunk: Buffer) => {
-        stream.pause();
+    return new Promise<void>(async (then, reject) => {
+        let curFile = await getLatestFile(outputFile, maxSizeBytes);
+        let writeStream = fs.createWriteStream(curFile, {
+            flags: "a"
+        });
+        await openStream(writeStream);
 
-        
-        if (dataCounter + chunk.length > maxSizeBytes) {
+        let dataCounter = (await fs.stat(curFile)).size;
 
-            let remainderSize = maxSizeBytes - dataCounter;
-            if (remainderSize > 0) {
-                let remainder = chunk.slice(0, remainderSize);
-                let err = await writeToStream(writeStream, remainder);
-                if (err)
-                    console.error("Error writing to file " + curFile + ": " + err);
-                chunk = chunk.slice(remainderSize);
+        stream.on("data", async (chunk: Buffer) => {
+            stream.pause();
+
+            if (dataCounter + chunk.length > maxSizeBytes) {
+
+                let remainderSize = maxSizeBytes - dataCounter;
+                if (remainderSize > 0) {
+                    let remainder = chunk.slice(0, remainderSize);
+                    let err = await writeToStream(writeStream, remainder);
+                    if (err)
+                        console.error("Error writing to file " + curFile + ": " + err);
+                    chunk = chunk.slice(remainderSize);
+                }
+
+                // close the current file and  create a new one
+                writeStream.close();
+
+                curFile = getNextFile(outputFile, curFile);
+                writeStream = fs.createWriteStream(curFile);
+                await openStream(writeStream);
+
+                if (keepMaxFiles) {
+                    // check if the nr of files in the folder doesn't exceed the max limit
+                    if (throwErrorOnBufferOverflow) {
+                        let bufferOverflow = await isBufferOverflow(outputFile, keepMaxFiles);
+                        if (bufferOverflow) {
+                            reject(new Error("Buffer overflow"));;
+                        }
+                    }
+                    else {
+                        removeOldestFiles(outputFile, keepMaxFiles);
+                    }
+                }
+                dataCounter = 0;
             }
 
-            // close the current file and  create a new one
+            let err = await writeToStream(writeStream, chunk);
+            if (err)
+                console.error("Error writing to file " + curFile + ": " + err);
+            dataCounter += chunk.length;
+
+            // don't attempt to read further if cancelled, abandon stream
+            if (cancelToken.isCancelled()) {
+                writeStream.close();
+                then();
+                return;
+            }
+
+            stream.resume();
+        });
+
+        stream.on("end", () => {
             writeStream.close();
+            then();
+        });
 
-            curFile = getNextFile(outputFile, curFile);
-            writeStream = fs.createWriteStream(curFile);
-            await openStream(writeStream);
-
-            if (keepMaxFiles) {
-                // check if the nr of files in the folder doesn't exceed the max limit
-                await removeOldestFiles(outputFile, keepMaxFiles);
-            }
-            dataCounter = 0;
-        }
-
-        let err = await writeToStream(writeStream, chunk);
-        if (err)
-            console.error("Error writing to file " + curFile + ": " + err);
-        dataCounter += chunk.length;
-
-        stream.resume();
-
-    });
-    stream.on("end", () => {
-        writeStream.close();
-    });
-
-    stream.on("close", () => {
-        writeStream.close();
+        stream.on("close", () => {
+            writeStream.close();
+            then();
+        });
     });
 }
+
 
 interface PipeToStreamResult {
     isFinished: boolean;
     bytesWritten: number;
 }
-async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, expectedChunkSize: number, offset: number = 0): Promise<PipeToStreamResult> {
+async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, expectedChunkSize: number, offset: number, nrOfBytesToRead:number): Promise<PipeToStreamResult> {
     return new Promise<PipeToStreamResult>(async (then, reject) => {
         try {
-            let dataCounter = offset;
-
+          
             let readStream = fs.createReadStream(file, {
                 flags: "r",
-                start: dataCounter
+                start: offset,
+                end:  offset + nrOfBytesToRead // must read until a specific point and not EOF or else read chunks will get corrupted and skip a bunch of bytes occassionally (probably due to race conditions of being written to at the same time)
             });
+
+            let dataCounter = offset;
+
             await openStream(readStream);
 
-            readStream.on("data", async chunk => {
+            let isFinished = false;
+
+            readStream.on("data", async (chunk:Buffer) => {
+                // make a hard copy to see if this helps against the corruption
+                let cloneBuffer = Buffer.alloc(chunk.length);
+                chunk.copy(cloneBuffer);
+                chunk = cloneBuffer;
+
                 readStream.pause();
-                await writeToStream(outStream, chunk);
-                readStream.resume();
+
+                if (dataCounter + chunk.length >= expectedChunkSize) {
+                    isFinished = true;
+                }
+              //  console.log(`Piped data chunk of ${chunk.length} bytes, range: ${dataCounter} --> ${dataCounter + chunk.length}`);
                 dataCounter += chunk.length;
-                if (dataCounter >= expectedChunkSize) {
-                    // we're done reading
-                    readStream.close();
-                    then({
-                        bytesWritten: dataCounter,
-                        isFinished: true
-                    });
-                }
+
+                await writeToStream(outStream, chunk);
+              //  console.log("Resuming stream");
+                readStream.resume();
+
             });
+
             readStream.on("end", () => {
-                if (dataCounter >= expectedChunkSize) {
-                    // we're done reading
-                    readStream.close();
-                    then({
-                        bytesWritten: dataCounter,
-                        isFinished: true
-                    });
-                } else {
-                    // still expecting more data in this file but it wasn't written yet
-                    then({
-                        bytesWritten: dataCounter,
-                        isFinished: false
-                    });
-                }
+                // we're done reading
+                //console.log(`Done reading from file, data counter is at ${dataCounter}`)
+                readStream.close();
+                then({
+                    bytesWritten: dataCounter,
+                    isFinished: isFinished
+                });
             });
 
         } catch (e) {
@@ -229,7 +272,7 @@ async function delay(ms: number) {
     });
 }
 
-async function pipeFilesToStream(inputFile: string, outStream: NodeJS.WritableStream, expectedChunkSize: number) {
+async function pipeFilesToStream(inputFile: string, outStream: NodeJS.WritableStream, expectedChunkSize: number, cancelToken: CancelToken) {
 
     let stop = false;
     outStream.on("close", () => {
@@ -237,7 +280,9 @@ async function pipeFilesToStream(inputFile: string, outStream: NodeJS.WritableSt
         stop = true;
     });
 
-    while (!stop) {
+    let globalBytesWrittenToOutputStream = 0;
+
+    while (!stop && !cancelToken.isCancelled()) {
         let files: string[] = [];
         let filename = path.basename(inputFile);
         let folder = inputFile.substr(0, inputFile.length - filename.length);
@@ -262,33 +307,22 @@ async function pipeFilesToStream(inputFile: string, outStream: NodeJS.WritableSt
 
             let isFinished = false;
             let dataOffset = 0;
-            while (!isFinished) {
+            while (!isFinished && !cancelToken.isCancelled()) {
                 let fileSize = (await fs.stat(file)).size;
-
-                if (files.length > 1) {
-                    // it's easy if it's not the last file, just pipe the whole file to the output
-
-                    if (fileSize < expectedChunkSize) {
-                        // this file is not the latest one but it's not the expected chunk size, corruption will occur
-                        console.warn("Filesize of chunk " + file + " is unexpectedly less (" + fileSize + ") than the expected chunk size (" + expectedChunkSize + "). Corruption is highly probable");
-                    }
-
-                    console.log("Piping " + file + " with offset " + dataOffset + " to the stream");
-                    let result = await pipeFileToStream(file, outStream, expectedChunkSize, dataOffset);
-                    isFinished = result.isFinished;
-                    dataOffset = result.bytesWritten;
-
-                }
 
                 if (dataOffset < fileSize) {
 
-                    console.log("Piping " + file + " with offset " + dataOffset + " to the stream");
-                    let result = await pipeFileToStream(file, outStream, expectedChunkSize, dataOffset);
+                    //console.log("Piping " + file + " with offset " + dataOffset + " to the stream");
+                    let nrOfBytesToRead = fileSize - dataOffset;
+                    let result = await pipeFileToStream(file, outStream, expectedChunkSize, dataOffset, nrOfBytesToRead);
+                    globalBytesWrittenToOutputStream += result.bytesWritten - dataOffset;
+                    console.log(`Written ${result.bytesWritten - dataOffset} bytes from ${file} with offset ${dataOffset}, total bytes sent to outputstream is ${globalBytesWrittenToOutputStream}`);
                     isFinished = result.isFinished;
                     dataOffset = result.bytesWritten;
                 }
+
                 if (!isFinished) {
-                    console.warn("Buffer underrun, waiting for data to become available");
+                    // console.warn("Buffer underrun, waiting for data to become available");
                     await delay(100); //  wait a bit for data to become available
                 }
             }
@@ -305,28 +339,63 @@ async function pipeFilesToStream(inputFile: string, outStream: NodeJS.WritableSt
 
 
 
-
-
 export class DiskBufferWriter {
 
-    constructor(private pathAndFileFormat: string, private chunkSize: number, private keepMaxFiles?: number) {
+    private cancelToken: CancelToken;
 
+    constructor(private pathAndFileFormat: string, private chunkSize: number, private keepMaxFiles?: number) {
+        this.cancelToken = new CancelToken();
     }
 
     async pipeToDisk(readableStream: NodeJS.ReadableStream) {
-        await pipeStreamToFiles(readableStream, this.pathAndFileFormat, this.chunkSize, this.keepMaxFiles);
+        await pipeStreamToFiles(readableStream, this.pathAndFileFormat, this.chunkSize, this.cancelToken, this.keepMaxFiles);
+    }
+
+    async cancel() {
+        this.cancelToken.cancel();
     }
 }
 
+
+const deleteFolderRecursive = async (p: string) => {
+    if (await fs.exists(p)) {
+        for (let entry of await fs.readdir(p)) {
+            const curPath = path + "/" + entry;
+            if ((await fs.lstat(curPath)).isDirectory())
+                await deleteFolderRecursive(curPath);
+            else await fs.unlink(curPath);
+        }
+        await fs.rmdir(p);
+    }
+};
+
+
+
 export class DiskBufferReader {
 
-    constructor(private pathAndFileFormat: string, private expectedChunkSize: number) {
+    private cancelToken: CancelToken;
 
+    constructor(private pathAndFileFormat: string, private expectedChunkSize: number) {
+        this.cancelToken = new CancelToken();
     }
 
-    async pipeFromDisk(writeableStream: NodeJS.WritableStream) {
 
-        await pipeFilesToStream(this.pathAndFileFormat, writeableStream, this.expectedChunkSize);
+    async pipeFromDisk(writeableStream: NodeJS.WritableStream) {
+        await pipeFilesToStream(this.pathAndFileFormat, writeableStream, this.expectedChunkSize, this.cancelToken);
+    }
+
+
+
+    async cleanUp() {
+        let filename = path.basename(this.pathAndFileFormat);
+        let folder = this.pathAndFileFormat.substr(0, this.pathAndFileFormat.length - filename.length);
+
+        console.log("Cleaning up disk buffer, deleting folder " + folder);
+        await deleteFolderRecursive(folder);
+    }
+
+    async closeWhenBufferIsDone() {
+        this.cancelToken.cancel();
     }
 
 }

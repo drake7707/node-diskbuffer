@@ -1,6 +1,7 @@
 import * as fs from 'async-file';
 
 import * as path from "path";
+import { CancelToken } from './CancelToken';
 
 export var DEBUG: boolean = false;
 
@@ -466,7 +467,7 @@ interface PipeToStreamResult {
     readUntilOffset: number;
     nextMP4AtomOffset: number;
 }
-async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, expectedChunkSize: number, offset: number = 0, startMP4AtomOffset: number = 0): Promise<PipeToStreamResult> {
+async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, expectedChunkSize: number,offset: number, nrOfBytesToRead:number, startMP4AtomOffset: number = 0): Promise<PipeToStreamResult> {
     return new Promise<PipeToStreamResult>(async (then, reject) => {
         try {
             let curPositionInFile = offset;
@@ -474,6 +475,7 @@ async function pipeFileToStream(file: string, outStream: NodeJS.WritableStream, 
             let readStream = fs.createReadStream(file, {
                 flags: "r",
                 start: curPositionInFile,
+                end:  curPositionInFile + nrOfBytesToRead // must read until a specific point and not EOF or else read chunks will get corrupted and skip a bunch of bytes occassionally (probably due to race conditions of being written to at the same time)
               //  highWaterMark: 1024 // only read tiny amount to see how partial atoms work fine -> they do!!!
             });
             await openStream(readStream);
@@ -665,17 +667,6 @@ async function fileStartsWithFtypAndMoov(inputFile: string): Promise<CheckFileFo
 }
 
 
-class CancelToken {
-    private cancelled: boolean = false;
-    isCancelled() {
-        return this.cancelled;
-    }
-
-    cancel() {
-        this.cancelled = true;
-    }
-}
-
 async function pipeFilesToStream(inputFile: string, outStream: NodeJS.WritableStream, expectedChunkSize: number, writeInitChunkIfAvailable: boolean, cancelToken: CancelToken) {
 
     if (writeInitChunkIfAvailable) {
@@ -802,7 +793,8 @@ async function processFileToPipeToStream(file: string, writeInitChunkIfAvailable
 
         if (dataOffset < fileSize) {
             log("Piping " + file + " with offset " + dataOffset + " to the stream");
-            let result = await pipeFileToStream(file, outStream, expectedChunkSize, dataOffset, nextMP4AtomOffset);
+            let nrOfBytesToRead = fileSize - dataOffset;
+            let result = await pipeFileToStream(file, outStream, expectedChunkSize, dataOffset, nrOfBytesToRead, nextMP4AtomOffset);
             log(`Data of ${file} was piped to the stream until offset ${result.readUntilOffset}, isFinished=${result.isFinished}, next mp4 offset is at ${result.nextMP4AtomOffset}`);
             isFinished = result.isFinished;
             dataOffset = result.readUntilOffset;
